@@ -91,7 +91,7 @@ node "$R" doctor                        health check, including workspace groupi
 node "$R" start "<prompt>" [--cwd DIR] [--label NAME] [--mcp-config FILE]
                            [--permission allow|reject] [--timeout-ms N]
                            [--defer-to-off-peak] [--detach] [--json]
-node "$R" wait   <jobId>                block until the job settles
+node "$R" wait   <jobId>                print the header, then block until the job settles
 node "$R" update <jobId> "<new info>"   steer a running job
 node "$R" cancel <jobId>                stop it outright
 node "$R" list   [--all]                recent jobs

@@ -1221,6 +1221,14 @@ async function commandWait(positional, flags) {
   const timeoutMs = Number(typeof flags['timeout-ms'] === 'string' ? flags['timeout-ms'] : 15 * 60 * 1000)
   const deadline = Date.now() + timeoutMs
   let job = reconcileJob(readJob(jobId))
+  // A wait can last as long as the job does, and a caller watching this
+  // process (a terminal, an agent's shell panel) sees nothing until it exits.
+  // Print the header at once — the session id and follow link are the point of
+  // waiting — then one line per state change and a heartbeat every 15s.
+  const human = flags.json !== true
+  if (human) process.stdout.write(`${describeJob(job, { full: true })}\n\nwaiting   for the job to settle; Ctrl-C stops waiting, not the job\n`)
+  let lastState = job.state
+  let lastLine = Date.now()
   while (isActiveState(job.state)) {
     if (Date.now() > deadline) {
       process.stderr.write(`dsh-offload: wait timed out after ${timeoutMs}ms; job ${jobId} is still running.\n`)
@@ -1228,7 +1236,19 @@ async function commandWait(positional, flags) {
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000))
     job = reconcileJob(readJob(jobId))
+    if (!human) continue
+    const now = Date.now()
+    if (job.state !== lastState) {
+      process.stdout.write(`state     ${lastState} → ${job.state}  (${humanDuration(now - job.startedAt)})\n`)
+      lastState = job.state
+      lastLine = now
+    } else if (now - lastLine >= 15_000) {
+      const progress = job.progressChars ? `, progress ${job.progressChars} chars` : ''
+      process.stdout.write(`waiting   ${job.state} ${humanDuration(now - job.startedAt)}${progress}\n`)
+      lastLine = now
+    }
   }
+  if (human) process.stdout.write('\n')
   return commandResult([jobId], flags)
 }
 

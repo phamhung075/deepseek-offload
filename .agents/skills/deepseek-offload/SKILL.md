@@ -169,7 +169,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `result` | Final report text. | `0` done, `1` error, `2` still running |
 | `update` | Relays new information to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
-| `wait` | Polls until settled, then prints the result. | as `result`, `2` on timeout |
+| `wait` | Prints the job header at once — session id and follow link included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
 | `list` | Recent jobs, newest first; `--all` for every job. | `0` |
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
