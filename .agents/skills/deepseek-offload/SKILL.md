@@ -298,7 +298,8 @@ original session in the GUI.
 
 ## 10. Reference files
 
-- [.agents/skills/deepseek-offload/scripts/dsh-offload.mjs](.agents/skills/deepseek-offload/scripts/dsh-offload.mjs) — background job runner.
+- [.agents/skills/deepseek-offload/scripts/dsh-offload.mjs](scripts/dsh-offload.mjs) — background job runner.
+- [../../../INSTALL.md](../../../INSTALL.md) — the install runbook: to set this package up in a project, follow it phase by phase instead of assembling the steps from this file.
 - [references/prompt-templates.md](references/prompt-templates.md) — copy-paste job prompts.
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.
 - [../../mcp-deepseek/README.md](../../mcp-deepseek/README.md) — bridge setup and env vars.

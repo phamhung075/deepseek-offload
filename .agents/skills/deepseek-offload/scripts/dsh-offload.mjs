@@ -1530,7 +1530,7 @@ function commandWindow(_positional, flags) {
 }
 
 function usage() {
-  process.stdout.write(`dsh-offload — background DeepSeek delegation through bridge/server.cjs
+  process.stdout.write(`dsh-offload — background DeepSeek delegation through the MCP bridge
 
   doctor                       verify bridge, DSH_HOME, acp model, MCP config and job store
   window [--tz IANA] [--json]  DeepSeek peak/off-peak status now, and when it next flips

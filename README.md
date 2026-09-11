@@ -22,6 +22,7 @@ Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ d
 | [`.agents/skills/deepseek-offload/`](.agents/skills/deepseek-offload/SKILL.md) | The skill doc for the calling agent: when to offload, the blocking MCP path vs. fire-and-forget background jobs, prompt contracts, safety rules, troubleshooting. |
 | [`.agents/dsh-workspace-attach/`](.agents/dsh-workspace-attach/README.md) | DSH web-profile plugin that files delegated sessions under the project folder they ran in. |
 | [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, optional vision subagent, then `doctor`. `--dry-run`, `--uninstall`, `--json`. |
+| [`INSTALL.md`](INSTALL.md) | The install procedure written for an AI agent to execute for a human: recon, install, verify, smoke test, failure playbook, report template. |
 | [`harness/`](harness/README.md) | The Harness-side changes that make all of this work, as reviewable files and a patch. |
 
 ## Requirements
@@ -37,6 +38,10 @@ Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ d
   the background runner from a shell.
 
 ## Quick start
+
+**Handing this to an AI agent to install for you?** Point it at [`INSTALL.md`](INSTALL.md) — it is a
+runbook that specifies the recon, install, verification, smoke test, and report steps in order,
+including what to do when a phase fails.
 
 Two commands, from the project you want to delegate from:
 
