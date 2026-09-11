@@ -4,9 +4,9 @@ description: >-
   Use this skill to offload long, token-heavy, or parallelizable work from the
   current agent (Claude Code, Gemini/Antigravity, ChatGPT/Codex, or any MCP client)
   to background DeepSeek Harness subagents running on deepseek-v4-flash-vision-exp.
-  Covers the MCP bridge at <package>/bridge/server.cjs (the submodule's copy)
+  Covers the MCP bridge at .agents/mcp-deepseek/server.cjs
   (deepseek_agent / deepseek_list_sessions / deepseek_update_session), the
-  background job runner in runner/dsh-offload.mjs (including `update` to steer,
+  background job runner in .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (including `update` to steer,
   `cancel` to stop a still-running job, `window` to check DeepSeek's peak/off-peak
   pricing, and `start --defer-to-off-peak` to schedule batch work for half price),
   how to hand the user a followable session id in the DeepSeek web GUI, prompt
@@ -26,11 +26,12 @@ verifying; the calling model pays only for the prompt and the report.
 > the session id so the human can open it, watch the run, and take over the conversation if
 > needed.
 >
-> **Paths in this skill are relative to the package.** It is vendored as a submodule, usually at
-> `.agents/deepseek-offload/`; so `bridge/server.cjs` means
-> `.agents/deepseek-offload/bridge/server.cjs` in the project you are working in, and the same for
-> `runner/dsh-offload.mjs`. `install.sh` in that directory wires the bridge into the project's
-> agent config and the DSH profiles; `doctor` reports whether everything is connected.
+> **Paths in this skill are relative to this package**, which is an `.agents/` tree. A project
+> either links those entries into its own `.agents/` (then `.agents/mcp-deepseek/server.cjs` is that
+> project's path), or vendors the whole repository as a submodule — usually
+> `.agents/deepseek-offload/` — and prefixes every path here with it. `install.sh` wires the bridge
+> into the project's agent config and the DSH profiles; `doctor` reports whether everything is
+> connected.
 
 ---
 
@@ -55,7 +56,7 @@ Rule of thumb: **if the work produces more intermediate text than final text, of
 Claude Code / Gemini / Codex / any MCP client
         │  (path A) MCP over stdio            (path B) shell
         ▼                                            ▼
- bridge/server.cjs  ◄── runner/dsh-offload.mjs (background job runner)
+ .agents/mcp-deepseek/server.cjs  ◄── .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (background job runner)
         │  spawns `dsh --profile acp`
         ▼
  DeepSeek Harness agent, model deepseek-v4-flash-vision-exp
@@ -77,7 +78,7 @@ there is no per-call model switch. Because it's vision-capable, offloaded jobs c
 images (same model `read_image_vision` uses). Verify before relying on it:
 
 ```sh
-node .agents/deepseek-offload/runner/dsh-offload.mjs doctor
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs doctor
 # ok  acp profile patch — model=deepseek-v4-flash-vision-exp
 ```
 
@@ -85,7 +86,7 @@ node .agents/deepseek-offload/runner/dsh-offload.mjs doctor
 
 ## 4. Path A — MCP tools (interactive, blocking)
 
-Three tools, exposed by `bridge/server.cjs`:
+Three tools, exposed by `.agents/mcp-deepseek/server.cjs`:
 
 | Tool | Arguments | Returns |
 | :--- | :--- | :--- |
@@ -135,12 +136,12 @@ endpoint, which this bridge doesn't provide.
 
 ## 5. Path B — Background jobs (fire-and-forget, preferred for real work)
 
-`runner/dsh-offload.mjs` is an MCP *client* for the same bridge: it starts a detached worker that
+`.agents/skills/deepseek-offload/scripts/dsh-offload.mjs` is an MCP *client* for the same bridge: it starts a detached worker that
 owns one `deepseek_agent` call, with job state in `scratch/dsh-offload/jobs/` (git-ignored,
 docker-ignored — rule 05).
 
 ```sh
-OFF=.agents/deepseek-offload/runner/dsh-offload.mjs
+OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
 
 node "$OFF" doctor                       # verify bridge, DSH_HOME, model, MCP config, job store
 node "$OFF" window                       # is DeepSeek pricing peak or off-peak right now?
@@ -283,7 +284,7 @@ original session in the GUI.
 
 | Symptom | Cause and fix |
 | :--- | :--- |
-| `doctor` FAIL: bridge not found | Wrong layout — the runner expects `bridge/server.cjs` beside it, i.e. the submodule checked out whole. |
+| `doctor` FAIL: bridge not found | Wrong layout — the runner expects `.agents/mcp-deepseek/server.cjs` beside it, i.e. the submodule checked out whole. |
 | Session never appears in the GUI | `DSH_HOME` mismatch — GUI and bridge must share `~/.dsh`. |
 | `dsh --profile acp exited with code …` | `acp` profile not initialized: `cd ~/deepseek-harness && pnpm dsh --profile acp --dump-config`. |
 | Job `state: error`, worker gone | Worker died (crash/reboot) — read `scratch/dsh-offload/jobs/<jobId>.worker.log`. |
@@ -297,7 +298,7 @@ original session in the GUI.
 
 ## 10. Reference files
 
-- [runner/dsh-offload.mjs](runner/dsh-offload.mjs) — background job runner.
+- [.agents/skills/deepseek-offload/scripts/dsh-offload.mjs](.agents/skills/deepseek-offload/scripts/dsh-offload.mjs) — background job runner.
 - [references/prompt-templates.md](references/prompt-templates.md) — copy-paste job prompts.
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.
 - [../../mcp-deepseek/README.md](../../mcp-deepseek/README.md) — bridge setup and env vars.

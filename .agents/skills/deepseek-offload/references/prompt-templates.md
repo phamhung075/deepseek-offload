@@ -68,7 +68,7 @@ Budget: at most 300 words.
 Start each in its own job so they run concurrently, then collect:
 
 ```sh
-OFF=.agents/deepseek-offload/runner/dsh-offload.mjs
+OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
 node "$OFF" start "<workstream 1 prompt>" --cwd "$PWD" --label ws1
 node "$OFF" start "<workstream 2 prompt>" --cwd "$PWD" --label ws2
 node "$OFF" start "<workstream 3 prompt>" --cwd "$PWD" --label ws3
