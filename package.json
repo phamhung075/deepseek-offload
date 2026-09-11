@@ -1,0 +1,5 @@
+{
+  "name": "deepseek-offload",
+  "description": "MCP bridge and background-job CLI that delegate work from an MCP client to a DeepSeek Harness dsh session.",
+  "private": true
+}
