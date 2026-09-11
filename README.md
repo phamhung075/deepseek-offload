@@ -58,7 +58,7 @@ What it wires, and why each piece is needed:
 | Step | What it does |
 | :--- | :--- |
 | Harness profiles | Creates `$DSH_HOME/profiles/{acp,web}` if missing (through `dsh` itself). |
-| `acp` profile | Pins the model every delegated session runs on. |
+| `acp` profile | Pins the model every delegated session runs on, and declares the provider's model catalog with that id: a patch **replaces** the catalog, and an id it does not carry resolves as text-only, so image jobs would be refused. |
 | `$DSH_HOME/plugins/dsh-workspace-attach` | Installs the workspace plugin (a copy, so it survives this package moving or being deleted). |
 | Web profile | Adds one fenced loader row pointing at that plugin. |
 | Project `.agents/` | Links the bridge (`.agents/mcp-deepseek/server.cjs`), the runner (`.agents/skills/deepseek-offload/scripts/dsh-offload.mjs`), the plugin, and the skill references into the project. A path the project already has is **never** overwritten. |
@@ -158,7 +158,7 @@ Bridge and runner environment (all optional):
 | `DEEPSEEK_MCP_CONFIG` | MCP config forwarded into delegated sessions. |
 | `DEEPSEEK_MCP_SKIP` | Server names never forwarded. |
 | `DEEPSEEK_MCP_TIMEOUT_MS` | Per-turn timeout. Default 15 min. |
-| `DEEPSEEK_OFFLOAD_MODEL` | Model pinned into the `acp` profile by `install.sh` (`--model` overrides). Default `deepseek-v4-flash-vision-exp`. |
+| `DEEPSEEK_OFFLOAD_MODEL` | Model pinned into the `acp` profile by `install.sh` (`--model` overrides). Default `deepseek-flash`. |
 | `DEEPSEEK_WORKSPACE_ATTACH` | `0` stops asking the GUI to file jobs under their project. |
 | `DEEPSEEK_WORKSPACE_ATTACH_DIR` | Adoption inbox override. |
 | `DSH_BRIDGE_PROJECT_ROOT`, `DSH_OFFLOAD_JOB_DIR` | Where job records live. Default `<cwd>/scratch/dsh-offload`. |

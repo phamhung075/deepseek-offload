@@ -1,10 +1,30 @@
 # The acp profile pins the model every delegated session runs on. Copy this
 # file to $DSH_HOME/profiles/acp/cordis.patch.yml (the installer does it), or
-# merge the row into an existing patch layer. Verify with:
+# merge the rows into an existing patch layer. Verify with:
 #   dsh --profile acp --dump-config
 # Change the id with `install.sh --model <id>` or DEEPSEEK_OFFLOAD_MODEL; the
-# provider route must know it.
+# provider route must know it (`deepseek-flash`, `deepseek-v4-pro`).
 - id: acp
   config:
     provider: deepseek-official
-    model: deepseek-v4-flash-vision-exp
+    model: deepseek-flash
+
+# The second row exists because a patch REPLACES the provider's model catalog,
+# and a model the catalog does not carry resolves as text-only: an image job
+# under it is refused with `does not declare image input`. This lists the ids a
+# pin or a `--model` switch may use, with the two that accept images marked.
+- id: llm-deepseek
+  config:
+    models:
+      - id: deepseek-flash
+        name: DeepSeek-V4.1-Flash
+        inputModalities: ['text', 'image']
+      - id: deepseek-v4-pro
+        name: DeepSeek-V4-Pro
+        inputModalities: ['text']
+      - id: deepseek-v4-flash
+        name: DeepSeek-V4-Flash
+        inputModalities: ['text']
+      - id: deepseek-v4-flash-vision-exp
+        name: DeepSeek-V4-Flash-Vision-Exp
+        inputModalities: ['text', 'image']

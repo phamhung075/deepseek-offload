@@ -11,6 +11,7 @@ update, or applied by hand on a machine where the installer cannot run.
 | Change | File | Installer flag |
 | --- | --- | --- |
 | `acp` profile pins the delegation model | [`profiles/acp.cordis.patch.yml`](profiles/acp.cordis.patch.yml) | always |
+| `acp` profile declares its model catalog | [`profiles/acp.cordis.patch.yml`](profiles/acp.cordis.patch.yml) | always |
 | Web profile loads the workspace plugin | [`profiles/web.cordis.patch.yml`](profiles/web.cordis.patch.yml) | always |
 | `read_image_vision` subagent in the `standard` preset | [`patches/standard-preset-read-image-vision.patch`](patches/standard-preset-read-image-vision.patch) | `--with-vision-subagent` |
 
@@ -26,7 +27,7 @@ job onto a different model without a line of this package changing.
 - id: acp
   config:
     provider: deepseek-official
-    model: deepseek-v4-flash-vision-exp
+    model: deepseek-flash
 ```
 
 Verify: `dsh --profile acp --dump-config` shows the `acp` row with that model. A model id the
@@ -34,7 +35,42 @@ provider does not know fails at the first turn with `The supported API model nam
 job that dies instantly is usually this pin, not the bridge — change it with
 `install.sh --model <id>` (or `DEEPSEEK_OFFLOAD_MODEL`) rather than editing the row by hand.
 
-## 2. The web profile loads the workspace plugin
+`deepseek-flash` is the name this route accepts; `deepseek-v4-pro` is the other one. The ids
+`deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` still resolve but name retired models served
+by DeepSeek-V4.1-Flash, so pin one only for compatibility with a route that has not moved on.
+
+## 2. The `acp` profile declares its model catalog
+
+The provider ships a catalog of model ids with the input each one accepts. **A profile patch replaces
+that catalog**, and a model the catalog does not carry resolves as text-only, so an image job under
+it is refused:
+
+```
+Error: cannot read "scan.png" as an image: model "deepseek-flash" does not declare image input
+```
+
+The provider's own catalog declares image input for `deepseek-v4-flash-vision-exp`, not for the
+current `deepseek-flash`, so pinning the current id without this row silently costs image support —
+the job still runs, it just cannot read a picture. `$DSH_HOME/profiles/acp/cordis.patch.yml`:
+
+```yaml
+- id: llm-deepseek
+  config:
+    models:
+      - id: deepseek-flash
+        name: DeepSeek-V4.1-Flash
+        inputModalities: ['text', 'image']
+      - id: deepseek-v4-pro
+        name: DeepSeek-V4-Pro
+        inputModalities: ['text']
+```
+
+Verify: `dsh --profile acp --dump-config` shows the `llm-deepseek` row with that list, and
+`dsh-offload doctor` prints `ok  model accepts images`. Because the patch replaces rather than
+extends the catalog, an id the file omits stops being selectable in that profile — where the
+provider later adds a model, add it here too.
+
+## 3. The web profile loads the workspace plugin
 
 The GUI files sessions into projects through a durable account that only the GUI process writes,
 so the plugin that updates it has to run **inside** the GUI — see
@@ -58,7 +94,7 @@ grouping after this package moves or is deleted. That path is a copy of the plug
 (verified against a running instance); a profile that is `patchReload: startup` needs `dsh web`
 restarted.
 
-## 3. Optional: the `read_image_vision` subagent
+## 4. Optional: the `read_image_vision` subagent
 
 A session whose model is text-only cannot read an image file. A `spawn`-backend subagent pinned to
 a vision model fixes that without moving the parent session onto a vision model:

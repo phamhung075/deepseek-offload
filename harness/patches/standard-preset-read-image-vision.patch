@@ -1,5 +1,5 @@
 diff --git a/packages/preset/agent-presets/presets/standard/agent.cordis.yml b/packages/preset/agent-presets/presets/standard/agent.cordis.yml
-index 63b1798840..85301e4b8c 100644
+index 63b1798840..65b1586373 100644
 --- a/packages/preset/agent-presets/presets/standard/agent.cordis.yml
 +++ b/packages/preset/agent-presets/presets/standard/agent.cordis.yml
 @@ -196,6 +196,26 @@
@@ -21,7 +21,7 @@ index 63b1798840..85301e4b8c 100644
 +        maxDepth: 1
 +        agentOptions:
 +          provider: deepseek-official
-+          model: deepseek-v4-flash-vision-exp
++          model: deepseek-flash
 +        persona: >-
 +          You are a vision reader. Inspect the image file(s) the task names using the
 +          read_image tool and report their contents accurately and completely, then stop.

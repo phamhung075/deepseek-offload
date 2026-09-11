@@ -53,22 +53,27 @@ const BRIDGE = path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'server.cjs')
  */
 function acpModel() {
   const flag = typeof args.model === 'string' ? args.model.trim() : ''
-  return flag !== '' ? flag : process.env.DEEPSEEK_OFFLOAD_MODEL || 'deepseek-v4-flash-vision-exp'
+  return flag !== '' ? flag : process.env.DEEPSEEK_OFFLOAD_MODEL || 'deepseek-flash'
 }
 /** Provider route that model id belongs to. */
 const ACP_PROVIDER = 'deepseek-official'
 /** Marker comments fence the rows this installer owns. */
 const ACP_BEGIN = '# deepseek-offload: acp delegation model pin — begin'
 const ACP_END = '# deepseek-offload: acp delegation model pin — end'
+const CATALOG_BEGIN = '# deepseek-offload: acp model catalog — begin'
+const CATALOG_END = '# deepseek-offload: acp model catalog — end'
 const PLUGIN_BEGIN = '# deepseek-offload: workspace grouping plugin — begin'
 const PLUGIN_END = '# deepseek-offload: workspace grouping plugin — end'
+
+/** Model ids the provider's own catalog declares as accepting image input. */
+const VISION_MODEL_IDS = new Set(['deepseek-flash', 'deepseek-v4-flash-vision-exp'])
 
 const args = parseArgs(process.argv.slice(2))
 const log = (...parts) => process.stdout.write(`${parts.join(' ')}\n`)
 const warn = (...parts) => process.stderr.write(`deepseek-offload: ${parts.join(' ')}\n`)
 
 /** Text-surgery helpers, exported for tests; `main` is the only entry point. */
-export { hasRows, stripFencedBlock, stripLoaderRow }
+export { acpCatalogRows, hasRows, stripFencedBlock, stripLoaderRow }
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main()
@@ -103,6 +108,7 @@ function main() {
 
   ensureProfile(home, 'acp', dshRoot)
   ensureAcpPin(acpPatch)
+  ensureAcpCatalog(acpPatch)
 
   ensureProfile(home, 'web', dshRoot)
   installPlugin(pluginDir)
@@ -439,6 +445,67 @@ function ensureAcpPin(file) {
   writeBlock(file, ACP_BEGIN, ACP_END, block)
 }
 
+/**
+ * The provider catalog entries the `acp` profile needs.
+ *
+ * A profile patch **replaces** the provider's own model catalog, and a model
+ * absent from the catalog resolves as text-only, so an image job under it is
+ * refused with `model "…" does not declare image input`. The pinned id has to be
+ * listed for that reason, and the ids a later `--model` might switch to are
+ * listed with it, so the catalog never silently narrows.
+ * @param model - the pinned model id.
+ * @returns catalog entries, pin first.
+ */
+function acpCatalogRows(model) {
+  const known = [
+    ['deepseek-flash', 'DeepSeek-V4.1-Flash'],
+    ['deepseek-v4-pro', 'DeepSeek-V4-Pro'],
+    ['deepseek-v4-flash', 'DeepSeek-V4-Flash'],
+    ['deepseek-v4-flash-vision-exp', 'DeepSeek-V4-Flash-Vision-Exp'],
+  ]
+  const ordered = [[model, known.find(([id]) => id === model)?.[1] ?? model], ...known.filter(([id]) => id !== model)]
+  return ordered.map(([id, name]) => ({
+    id,
+    name,
+    inputModalities: VISION_MODEL_IDS.has(id) ? ['text', 'image'] : ['text'],
+  }))
+}
+
+/**
+ * Ensure the `acp` profile's catalog declares the pinned model.
+ *
+ * Without this row the pin still works but is text-only: it names an id the
+ * provider's own catalog does not carry, and every image job under it fails.
+ * A catalog the file declares by hand is left alone.
+ * @param file - absolute path to the profile's patch file.
+ */
+function ensureAcpCatalog(file) {
+  const source = readText(file)
+  const pinned = acpModel()
+  const block = [
+    CATALOG_BEGIN,
+    '- id: llm-deepseek',
+    '  config:',
+    '    models:',
+    ...acpCatalogRows(pinned).flatMap(row => [
+      `      - id: ${row.id}`,
+      `        name: ${row.name}`,
+      `        inputModalities: [${row.inputModalities.map(modality => `'${modality}'`).join(', ')}]`,
+    ]),
+    CATALOG_END,
+  ].join('\n')
+  if (source.includes(CATALOG_BEGIN)) {
+    if (stripFencedBlock(source, CATALOG_BEGIN, CATALOG_END).block === block) {
+      log(`unchanged  ${file} (managed model catalog)`)
+      return
+    }
+  } else if (new RegExp(`^\\s*- id: ${pinned}\\s*$`, 'm').test(source)) {
+    log(`unchanged  ${file} (a catalog entry already declares ${pinned})`)
+    return
+  }
+  writeBlock(file, CATALOG_BEGIN, CATALOG_END, block)
+}
+
 /** Ensure the web profile loads this package's workspace plugin. */
 function ensurePluginRow(file, pluginEntry) {
   const source = readText(file)
@@ -671,7 +738,11 @@ function addVisionSubagent(dshRoot) {
 
 /** Remove every managed row, plugin install, project link, and MCP entry. */
 function uninstall({ acpPatch, webPatch, pluginDir, mcpFiles, project }) {
-  for (const [file, begin, end] of [[acpPatch, ACP_BEGIN, ACP_END], [webPatch, PLUGIN_BEGIN, PLUGIN_END]]) {
+  for (const [file, begin, end] of [
+    [acpPatch, ACP_BEGIN, ACP_END],
+    [acpPatch, CATALOG_BEGIN, CATALOG_END],
+    [webPatch, PLUGIN_BEGIN, PLUGIN_END],
+  ]) {
     if (!fs.existsSync(file)) {
       log(`skipped    ${file} (absent)`)
       continue

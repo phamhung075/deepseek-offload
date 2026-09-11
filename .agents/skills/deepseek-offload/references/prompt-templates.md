@@ -83,7 +83,7 @@ jobs write files, give them disjoint output paths — the children cannot see ea
 
 ## 5. Vision batch (images and scanned pages)
 
-The child runs on `deepseek-v4-flash-vision-exp`, so it can read images directly:
+The child runs on `deepseek-flash`, so it can read images directly:
 
 ```
 Objective: describe what each image in <directory> contains.

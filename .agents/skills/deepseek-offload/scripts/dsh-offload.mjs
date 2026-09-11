@@ -1414,6 +1414,25 @@ function positiveFlag(value, fallback) {
 }
 
 /**
+ * Whether a profile patch declares image input for one catalog model id.
+ * @param patchText - contents of the profile's patch file.
+ * @param id - the catalog model id to look for.
+ * @returns true when that model's own entry lists `image`.
+ */
+function catalogDeclaresImage(patchText, id) {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const lines = patchText.split('\n')
+  const index = lines.findIndex(line => new RegExp(`^\\s*- id: ${escaped}\\s*$`).test(line))
+  if (index < 0) return false
+  const entry = []
+  for (let line = index + 1; line < lines.length; line += 1) {
+    if (/^\s*- id: /.test(lines[line])) break
+    entry.push(lines[line])
+  }
+  return /inputModalities\s*:\s*\[[^\]]*image/.test(entry.join('\n'))
+}
+
+/**
  * Verify the toolchain prerequisites and the two facts that decide whether a
  * delegated session will be grouped under its project folder: the workspace
  * plugin must be answering, and the GUI must be running to answer at all.
@@ -1434,12 +1453,25 @@ async function commandDoctor(_positional, flags) {
 
   const patchFile = path.join(dshHome, 'profiles', 'acp', 'cordis.patch.yml')
   let model = null
+  let patchText = ''
   if (fs.existsSync(patchFile)) {
-    const patch = fs.readFileSync(patchFile, 'utf8')
-    const match = /^\s*model:\s*(\S+)\s*$/m.exec(patch)
+    patchText = fs.readFileSync(patchFile, 'utf8')
+    const match = /^\s*model:\s*(\S+)\s*$/m.exec(patchText)
     model = match === null ? null : match[1]
   }
   push('acp profile patch', model !== null, model === null ? `no model override in ${patchFile}` : `model=${model} (${patchFile})`)
+  // A pin that names a model the provider's catalog does not carry still runs,
+  // but text-only: image jobs under it are refused at the first read. The
+  // provider declares the vision model itself; every other id must be declared
+  // by the profile, which is what the installer's catalog row does.
+  const declaredVision = new Set(['deepseek-v4-flash-vision-exp'])
+  push('model accepts images', model === null || declaredVision.has(model) || catalogDeclaresImage(patchText, model), model === null
+    ? 'no pinned model to check'
+    : declaredVision.has(model)
+      ? `model=${model} (provider catalog)`
+      : catalogDeclaresImage(patchText, model)
+        ? `model=${model} (declared in ${patchFile})`
+        : `model=${model} does not declare image input — image jobs would be refused; add it to the llm-deepseek catalog in ${patchFile}`)
   push('job store writable', (() => {
     try {
       ensureDirs()

@@ -3,7 +3,7 @@ name: deepseek-offload
 description: >-
   Use this skill to offload long, token-heavy, or parallelizable work from the
   current agent (Claude Code, Gemini/Antigravity, ChatGPT/Codex, or any MCP client)
-  to background DeepSeek Harness subagents running on deepseek-v4-flash-vision-exp.
+  to background DeepSeek Harness subagents running on deepseek-flash.
   Covers the MCP bridge at .agents/mcp-deepseek/server.cjs
   (deepseek_agent / deepseek_list_sessions / deepseek_update_session), the
   background job runner in .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (including `update` to steer,
@@ -59,7 +59,7 @@ Claude Code / Gemini / Codex / any MCP client
  .agents/mcp-deepseek/server.cjs  ◄── .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (background job runner)
         │  spawns `dsh --profile acp`
         ▼
- DeepSeek Harness agent, model deepseek-v4-flash-vision-exp
+ DeepSeek Harness agent, model deepseek-flash
         │  session persisted to DSH_HOME
         ▼
  ~/.dsh/sessions/<cwd-slug>/<session-uuid>/  ──►  web GUI session list
@@ -71,15 +71,18 @@ Claude Code / Gemini / Codex / any MCP client
 
 ---
 
-## 3. Model: `deepseek-v4-flash-vision-exp`
+## 3. Model: `deepseek-flash`
 
 Pinned once in the profile patch layer (`~/.dsh/profiles/acp/cordis.patch.yml`), not per call —
-there is no per-call model switch. Because it's vision-capable, offloaded jobs can also read
-images (same model `read_image_vision` uses). Verify before relying on it:
+there is no per-call model switch. `deepseek-flash` is the current name of DeepSeek-V4.1-Flash, which
+supports vision, so offloaded jobs can read images directly (the same model `read_image_vision`
+uses). The legacy ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` still resolve to it
+today, but they name retired models; `deepseek-v4-pro` is the stronger text-only alternative. Verify
+before relying on it:
 
 ```sh
 node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs doctor
-# ok  acp profile patch — model=deepseek-v4-flash-vision-exp
+# ok  acp profile patch — model=deepseek-flash
 ```
 
 ---
@@ -290,6 +293,7 @@ original session in the GUI.
 | Job `state: error`, worker gone | Worker died (crash/reboot) — read `scratch/dsh-offload/jobs/<jobId>.worker.log`. |
 | `wait` times out, job still running | Not stuck — raise `--timeout-ms`; check `status`/GUI for live progress. |
 | Result ends mid-sentence | ACP prompt timeout (`DEEPSEEK_MCP_TIMEOUT_MS`) — split the job or raise it. |
+| `does not declare image input` on an image job | The pinned id is absent from the `acp` profile's model catalog, which a patch replaces: re-run `install.sh`, then `doctor` (`model accepts images`). |
 | `session/new` fails with bare `Internal error` | A forwarded MCP server didn't start — run `mcp-servers --mcp-config <file>` to find which. |
 | `references unset environment variable X` | Forwarded config uses `${X}`, bridge's env lacks it — export it in the launching shell. |
 | MCP tools missing from the child | No config passed / `DEEPSEEK_MCP_CONFIG` unset, or the server was self-skipped — `mcp-servers` reports both. |

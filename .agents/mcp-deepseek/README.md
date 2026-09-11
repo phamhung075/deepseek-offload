@@ -109,14 +109,16 @@ A server that fails to start aborts `session/new` — DSH reports this as a gene
 
 ## Choosing the DeepSeek model
 
-The bundle default is `deepseek-v4-flash`; this workspace pins the vision-capable
-model in `~/.dsh/profiles/acp/cordis.patch.yml`:
+The route accepts `deepseek-flash` (vision-capable, and the id this installer pins) and
+`deepseek-v4-pro`. The older ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still
+accepted, but they name retired models served by DeepSeek-V4.1-Flash, so a new install should not
+pin them. The pin lives in `~/.dsh/profiles/acp/cordis.patch.yml`:
 
 ```yaml
 - id: acp
   config:
     provider: deepseek-official
-    model: deepseek-v4-flash-vision-exp
+    model: deepseek-flash
 ```
 
 Verify the pin with `pnpm dsh --profile acp --dump-config` (look for the `acp`

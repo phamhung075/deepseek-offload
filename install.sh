@@ -40,7 +40,7 @@ deepseek-offload install.sh
                            instead of copying it (for plugin development)
   --model NAME             model every delegated session runs on
                            (default: $DEEPSEEK_OFFLOAD_MODEL, else
-                           deepseek-v4-flash-vision-exp)
+                           deepseek-flash)
   --with-vision-subagent   also add the read_image_vision subagent to the
                            Harness `standard` preset
   --dry-run                print the plan without writing anything

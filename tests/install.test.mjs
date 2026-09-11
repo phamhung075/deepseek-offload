@@ -9,10 +9,28 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { hasRows, stripFencedBlock, stripLoaderRow } from '../install/configure.mjs'
+import { acpCatalogRows, hasRows, stripFencedBlock, stripLoaderRow } from '../install/configure.mjs'
 
 const FENCE = '# bridge: begin'
 const FENCE_END = '# bridge: end'
+
+test('the catalog declares image input only for the ids that accept it', () => {
+  const rows = acpCatalogRows('deepseek-flash')
+  assert.equal(rows[0].id, 'deepseek-flash', 'the pinned id comes first')
+  assert.deepEqual(rows[0].inputModalities, ['text', 'image'])
+  assert.equal(rows[0].name, 'DeepSeek-V4.1-Flash', 'the pinned id keeps its display name')
+  const byId = Object.fromEntries(rows.map(row => [row.id, row.inputModalities]))
+  assert.deepEqual(byId['deepseek-v4-pro'], ['text'], 'pro takes no images')
+  assert.deepEqual(byId['deepseek-v4-flash-vision-exp'], ['text', 'image'])
+  assert.equal(new Set(rows.map(row => row.id)).size, rows.length, 'no duplicate ids')
+})
+
+test('an unknown pin is still listed, and text-only', () => {
+  const rows = acpCatalogRows('deepseek-v5-experimental')
+  assert.equal(rows[0].id, 'deepseek-v5-experimental')
+  assert.deepEqual(rows[0].inputModalities, ['text'], 'only known ids are declared image-capable')
+  assert.equal(rows.length, 5, 'the known ids stay available behind the pin')
+})
 
 test('hasRows sees through comments and blank lines', () => {
   assert.equal(hasRows(''), false)

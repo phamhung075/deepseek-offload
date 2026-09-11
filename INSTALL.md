@@ -113,7 +113,7 @@ facts a wrong install gets wrong. Then install:
 | --- | --- |
 | `--with-mcp-config` | The human's agent is Claude Code (`.mcp.json`) or Gemini/Antigravity (`.agents/mcp_config.json`). Without it you get the profiles and the plugin, but no MCP entry. |
 | `--permission reject` | The work is read-only, or the project is untrusted. Default is `allow`: delegated sessions run unattended and auto-accept every permission prompt. Ask the human if unsure; `reject` is the safe answer. |
-| `--model NAME` | `doctor` later reports an API model-name error. Valid ids on the `deepseek-official` route: `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp` (default). |
+| `--model NAME` | `doctor` reports an API model-name error. This route accepts `deepseek-flash` (default, vision-capable) and `deepseek-v4-pro`; the legacy ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still accepted but name retired models, so do not choose one for a new install. |
 | `--dsh-root DIR` / `--dsh-home DIR` | Phase 0 found a Harness outside the conventional locations, or a `DSH_HOME` other than `~/.dsh`. |
 | `--with-vision-subagent` | The human also wants *their own* agent to read images through the Harness. Touches the Harness checkout's `standard` preset. |
 | `--no-project-links` | The project should not gain `.agents/` entries (rare; for a package used only as a shell tool). |
@@ -123,7 +123,7 @@ facts a wrong install gets wrong. Then install:
 
 | Target | Change |
 | --- | --- |
-| `$DSH_HOME/profiles/acp/cordis.patch.yml` | Pins the delegation model, inside managed `# deepseek-offload: … begin/end` fences. |
+| `$DSH_HOME/profiles/acp/cordis.patch.yml` | Pins the delegation model **and** declares the provider's model catalog with that id, each inside managed `# deepseek-offload: … begin/end` fences. The catalog row is not decoration: a patch replaces the catalog, and an id it does not carry resolves as text-only, so image jobs would be refused with `does not declare image input`. |
 | `$DSH_HOME/plugins/dsh-workspace-attach/` | A **copy** of the plugin, so the GUI keeps working if the project moves or is deleted. |
 | `$DSH_HOME/profiles/web/cordis.patch.yml` | One fenced loader row pointing at that copy. |
 | `<project>/.agents/…` | Links to the bridge, the runner, the plugin, and the skill references. **A path the project already has is kept, never overwritten.** |
@@ -146,7 +146,8 @@ Every line must start with `ok`. A healthy install reads:
 ok    node >= 18 — node 22.23.2
 ok    bridge server — /…/<project>/.agents/deepseek-offload/.agents/mcp-deepseek/server.cjs
 ok    DSH_HOME exists — /…/.dsh
-ok    acp profile patch — model=deepseek-v4-flash-vision-exp (/…/.dsh/profiles/acp/cordis.patch.yml)
+ok    acp profile patch — model=deepseek-flash (/…/.dsh/profiles/acp/cordis.patch.yml)
+ok    model accepts images — model=deepseek-flash (declared in /…/.dsh/profiles/acp/cordis.patch.yml)
 ok    job store writable — /…/<project>/scratch/dsh-offload/jobs
 ok    MCP config — DEEPSEEK_MCP_CONFIG unset — delegated jobs get no MCP tools
 ok    workspace grouping — plugin alive (pid 4242, 1s ago) — sessions join their project folder
@@ -158,6 +159,7 @@ Interpretation:
 | --- | --- |
 | `bridge server` | The submodule is not checked out whole: `git submodule update --init`. |
 | `acp profile patch` | Re-run `install.sh` to restore the managed pin; then check the model id against the list above. |
+| `model accepts images` | The pinned id is missing from the `acp` profile's model catalog, so jobs can still run but cannot read an image. Re-run `install.sh`: it rewrites the catalog row. Verify with a job that reads a PNG. |
 | `MCP config … no MCP tools` | Not an error: the child gets no MCP tools unless a job passes `--mcp-config`. Mention it, do not "fix" it. |
 | `workspace grouping` | The plugin is not loaded. Re-run `install.sh`; if the GUI was already running, reload its page. Only a GUI that is running *with* the row loaded reports alive. If you isolated `DSH_HOME` (a test install), this line fails by construction — the running GUI owns the real home. |
 
@@ -270,6 +272,7 @@ Diagnose with a command before proposing a fix. Each row names the command that 
 | `bootstrapping the acp profile failed` | `echo $DSH_ROOT; command -v dsh` | No Harness found. Re-run with `--dsh-root DIR`, or install the Harness first. |
 | `cannot get property "timer" without inject` | `node "$R" doctor` | The plugin was loaded by an incompatible Harness build. Update the Harness, or remove the plugin row and re-run `install.sh`. |
 | Job dies instantly; result carries `The supported API model names are …` | `node "$R" doctor` | The `acp` pin is not a valid id for the provider route. Re-run `install.sh --model <valid-id>`. |
+| A job that reads an image fails with `does not declare image input` | `node "$R" doctor` (`model accepts images`) | The pinned id is absent from the `acp` catalog, which a patch replaces wholesale. Re-run `install.sh`. |
 | Jobs land in **Ungrouped** | `node "$R" doctor` (workspace line) | The GUI is not running the plugin row: start/reload the GUI, or `sync-workspace` for old sessions. |
 | `doctor` says grouping is dead while the GUI is up | reload the GUI page, `doctor` again | The row was added after the GUI booted; `patchReload` applies it on reload. |
 | `session/new` fails with a bare `Internal error` | `node "$R" mcp-servers --mcp-config <file>` | A forwarded MCP server failed to start; DSH does not name it. |
