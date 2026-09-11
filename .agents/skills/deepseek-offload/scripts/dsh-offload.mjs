@@ -817,7 +817,12 @@ async function runWorker(jobId) {
           : { prompt: job.prompt, cwd: job.cwd, mcpConfig: job.mcpConfig },
         { timeoutMs: job.timeoutMs + 120_000, progressToken: 'dsh-offload' },
       )
-      .then((value) => ({ value }))
+      // An MCP-level failure arrives as a successful result carrying isError:
+      // without this check a dead job would be recorded as a finished one, with
+      // the error text handed back as if it were an answer.
+      .then((value) => (value.isError
+        ? { error: new Error(value.text.replace(/^Error:\s*/, '')) }
+        : { value }))
       .catch((error) => ({ error }))
 
     // Discover the new session id while the agent works, so the caller can be
