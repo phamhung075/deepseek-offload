@@ -50,11 +50,13 @@ so the plugin that updates it has to run **inside** the GUI — see
         intervalMs: 1000
 ```
 
-The installer points this row at a stable `$DSH_HOME/plugins/dsh-workspace-attach` symlink instead
-of a project path, so several projects can install from their own copy without fighting over the
-row. The `web` profile is `patchReload: live`, which means an added row is picked up by a running
-GUI after a page refresh (verified against a running instance); a profile that is
-`patchReload: startup` needs `dsh web` restarted.
+The installer points this row at `$DSH_HOME/plugins/dsh-workspace-attach` instead of a project path,
+so several projects can install from their own copy without fighting over the row, and the GUI keeps
+grouping after this package moves or is deleted. That path is a copy of the plugin;
+`--link-plugin` symlinks it instead, for work on the plugin itself. The `web` profile is
+`patchReload: live`, which means an added row is picked up by a running GUI after a page refresh
+(verified against a running instance); a profile that is `patchReload: startup` needs `dsh web`
+restarted.
 
 ## 3. Optional: the `read_image_vision` subagent
 

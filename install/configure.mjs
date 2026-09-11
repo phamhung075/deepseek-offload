@@ -640,9 +640,11 @@ function addVisionSubagent(dshRoot) {
   }
   const row = [
     '    # A dedicated image reader: a child pinned to the DeepSeek vision model so a',
-    '    # session can stay on a text-only model and still read image files. Fork cannot',
-    '    # do this — it inherits the parent model — so this stays on `spawn` with a fixed',
-    '    # route, and `one-shot` keeps the description inline.',
+    '    # session can stay on a text-only model (v4-flash / v4-pro) and still read',
+    '    # image files. Fork cannot do this — it inherits the parent\'s model — so this',
+    '    # stays on the `spawn` backend with a fixed route. `one-shot` waits for the',
+    '    # description inline, and `maxDepth: 1` keeps the reader a leaf (it cannot',
+    '    # delegate further).',
     '    - id: tool-subagent-read-image',
     "      name: '@deepseek-ai/dsh-tool-subagent'",
     '      config:',
@@ -656,6 +658,7 @@ function addVisionSubagent(dshRoot) {
     '        persona: >-',
     '          You are a vision reader. Inspect the image file(s) the task names using the',
     '          read_image tool and report their contents accurately and completely, then stop.',
+    '',
     '',
   ].join('\n')
   if (args['dry-run']) {
