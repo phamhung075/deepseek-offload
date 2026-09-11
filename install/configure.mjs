@@ -36,6 +36,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -86,15 +87,17 @@ function main() {
   log(`dsh        ${launchKind}${launchKind === 'source checkout' ? ` (${dshRoot})` : ''}`)
   log(`mode       ${args.uninstall ? 'uninstall' : args['dry-run'] ? 'dry run' : 'install'}`)
 
-  if (!fs.existsSync(BRIDGE)) fail(`the package looks incomplete: ${BRIDGE} is missing`)
+  if (!fs.existsSync(BRIDGE) && !args.uninstall) {
+    fail(`the package looks incomplete: ${BRIDGE} is missing`)
+  }
 
   const acpPatch = path.join(home, 'profiles', 'acp', 'cordis.patch.yml')
   const webPatch = path.join(home, 'profiles', 'web', 'cordis.patch.yml')
-  const pluginLink = path.join(home, 'plugins', 'dsh-workspace-attach')
+  const pluginDir = path.join(home, 'plugins', 'dsh-workspace-attach')
   const mcpFiles = [path.join(project, '.mcp.json'), path.join(project, '.agents', 'mcp_config.json')]
 
   if (args.uninstall) {
-    uninstall({ acpPatch, webPatch, pluginLink, mcpFiles })
+    uninstall({ acpPatch, webPatch, pluginDir, mcpFiles, project })
     return
   }
 
@@ -102,8 +105,16 @@ function main() {
   ensureAcpPin(acpPatch)
 
   ensureProfile(home, 'web', dshRoot)
-  linkPlugin(pluginLink)
-  ensurePluginRow(webPatch, path.join(pluginLink, 'index.js'))
+  installPlugin(pluginDir)
+  ensurePluginRow(webPatch, path.join(pluginDir, 'index.js'))
+
+  // The project side is what makes the toolchain reachable for the calling
+  // agent: the bridge path its MCP config names, and the skill its agent reads.
+  if (args['no-project-links'] === true) {
+    log('note       project entries untouched (--no-project-links)')
+  } else {
+    wireProject(project)
+  }
 
   if (args['with-mcp-config']) {
     for (const file of mcpFiles) registerMcpServer(file, project)
@@ -114,6 +125,170 @@ function main() {
   if (args['with-vision-subagent']) addVisionSubagent(dshRoot)
 
   verify(project, home)
+  summarise(project)
+}
+
+/**
+ * Put the workspace plugin where the profile row expects it.
+ *
+ * A copy is the default: the row then survives this package being moved,
+ * deleted, or upgraded, and two projects installing from their own copies
+ * cannot fight over the row. `--link-plugin` symlinks instead, which is what
+ * someone editing the plugin wants.
+ *
+ * @param destination - the plugin directory under `$DSH_HOME/plugins`.
+ */
+function installPlugin(destination) {
+  const wantLink = args['link-plugin'] === true
+  const isLink = readlinkOrNull(destination) !== null
+  const present = fs.existsSync(destination)
+  if (present && wantLink && isLink && fs.realpathSync(destination) === fs.realpathSync(PLUGIN_SOURCE)) {
+    log(`unchanged  ${destination} -> the package's plugin`)
+    return
+  }
+  if (present && !wantLink && !isLink && treeDigest(destination) === treeDigest(PLUGIN_SOURCE)) {
+    log(`unchanged  ${destination} (copy is current)`)
+    return
+  }
+  if (args['dry-run']) {
+    log(`would install the workspace plugin to ${destination}${wantLink ? ' as a link' : ' as a copy'}`)
+    return
+  }
+  fs.mkdirSync(path.dirname(destination), { recursive: true })
+  if (present) fs.rmSync(destination, { recursive: true, force: true })
+  if (wantLink) {
+    try {
+      fs.symlinkSync(PLUGIN_SOURCE, destination, 'dir')
+      log(`linked     ${destination} -> the package's plugin`)
+      return
+    } catch (error) {
+      warn(`symlink unavailable (${error.message}); installing a copy instead`)
+    }
+  }
+  fs.cpSync(PLUGIN_SOURCE, destination, { recursive: true })
+  log(`installed  ${destination} (copy of the package's plugin)`)
+}
+
+/**
+ * A content digest of a directory tree, so an unchanged copy is recognised.
+ * @param root - directory to hash.
+ * @returns a stable digest over relative paths and file contents.
+ */
+function treeDigest(root) {
+  const hash = createHash('sha256')
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      hash.update(path.relative(root, full))
+      hash.update(fs.readFileSync(full))
+    }
+  }
+  walk(root)
+  return hash.digest('hex')
+}
+
+/**
+ * Wire the project so its agent can reach the toolchain without reading docs.
+ *
+ * Each entry is created only when the project does not already have one, and a
+ * project file is never overwritten: a repository that keeps its own skill,
+ * bridge README, or MCP config only gains the missing piece. Links are relative
+ * so the checkout stays portable, and each one is verified to resolve before
+ * the step reports success.
+ *
+ * @param project - absolute project directory.
+ */
+function wireProject(project) {
+  if (path.resolve(project) === path.resolve(PACKAGE_ROOT)) {
+    log('note       project entries skipped: the project is this package')
+    return
+  }
+  const entries = [
+    { link: path.join(project, '.agents', 'mcp-deepseek', 'server.cjs'), target: path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'server.cjs') },
+    { link: path.join(project, '.agents', 'dsh-workspace-attach'), target: path.join(PACKAGE_ROOT, '.agents', 'dsh-workspace-attach') },
+    { link: path.join(project, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs'), target: path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs') },
+    { link: path.join(project, '.agents', 'skills', 'deepseek-offload', 'references'), target: path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'references') },
+  ]
+  for (const entry of entries) linkEntry(entry.link, entry.target)
+}
+
+/**
+ * Create one symlink into the package, unless the project already has that path.
+ * @param link - absolute path inside the project.
+ * @param target - absolute path inside the package.
+ */
+function linkEntry(link, target) {
+  if (fs.existsSync(link) || isDanglingLink(link)) {
+    const suffix = path.relative(PACKAGE_ROOT, target)
+    const satisfied = fs.existsSync(link)
+      && (fs.realpathSync(link) === fs.realpathSync(target)
+        || fs.realpathSync(link).endsWith(`${path.sep}${suffix}`))
+    if (satisfied) {
+      log(`unchanged  ${link}`)
+      return
+    }
+    log(`kept       ${link} (already present; not overwritten)`)
+    return
+  }
+  if (args['dry-run']) {
+    log(`would link ${link} -> package`)
+    return
+  }
+  fs.mkdirSync(path.dirname(link), { recursive: true })
+  const relative = path.relative(path.dirname(link), target)
+  // A short relative target keeps a checkout portable; one that climbs out of
+  // the project into an unrelated tree is clearer as an absolute path.
+  const climbs = relative.startsWith(['..', '..', '..'].join(path.sep))
+  const linked = climbs || relative.length > target.length ? target : relative
+  try {
+    fs.symlinkSync(linked, link)
+    if (!fs.existsSync(link)) throw new Error('the new link does not resolve')
+    log(`linked     ${link} -> ${linked}`)
+  } catch (error) {
+    fs.rmSync(link, { force: true })
+    // A filesystem without symlinks (Windows without developer mode) gets a
+    // copy: correct, just not updated when the package is.
+    fs.cpSync(target, link, { recursive: true })
+    log(`copied     ${link} (symlink unavailable: ${error.message})`)
+  }
+}
+
+/** Whether a path is a symlink whose target is missing. */
+function isDanglingLink(file) {
+  try {
+    return fs.lstatSync(file).isSymbolicLink() && !fs.existsSync(fs.realpathSync(file))
+  } catch {
+    return false
+  }
+}
+
+/** Read a symlink target, or null when the path is not a symlink. */
+function readlinkOrNull(file) {
+  try {
+    return fs.readlinkSync(file)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Close with the two facts a caller needs and cannot guess: how a job is
+ * started here, and that a running GUI has to reload.
+ */
+function summarise(project) {
+  if (args['dry-run'] || args.json) return
+  const runner = path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs')
+  const relative = path.relative(project, runner)
+  const shown = relative === '' || relative.startsWith('..') ? runner : relative
+  log('')
+  log('next steps')
+  log(`  1. start a job:  cd ${project} && node ${shown} start "<task>" --label my-job`)
+  log('  2. follow it:    http://127.0.0.1:3080/  (sessions are filed under the project folder)')
+  log('  3. if the GUI was already running, reload the page so the new profile row activates')
 }
 
 /** Parse `--flag value`, `--flag=value`, and bare `--flag` arguments. */
@@ -394,6 +569,19 @@ function linkPlugin(link) {
   }
 }
 
+/**
+ * Permission policy written into the generated MCP entry.
+ *
+ * `allow` is the default because delegated work is meant to run unattended;
+ * `--permission reject` makes the entry deny every prompt instead, which is what
+ * a read-only or untrusted workspace wants. Writing it explicitly means the
+ * choice is visible in the config rather than inherited from a default.
+ * @returns `allow` or `reject`.
+ */
+function permissionPolicy() {
+  return args.permission === 'reject' ? 'reject' : 'allow'
+}
+
 /** Register the bridge as a stdio MCP server in one agent config file. */
 function registerMcpServer(file, project) {
   let config = {}
@@ -411,6 +599,7 @@ function registerMcpServer(file, project) {
     env: {
       DEEPSEEK_MCP_DEFAULT_CWD: project,
       DEEPSEEK_WORKSPACE_ATTACH: '1',
+      DEEPSEEK_MCP_PERMISSION: permissionPolicy(),
     },
   }
   const servers = config.mcpServers ?? {}
@@ -477,8 +666,8 @@ function addVisionSubagent(dshRoot) {
   log(`patched    ${preset} (read_image_vision subagent)`)
 }
 
-/** Remove every managed row, link, and MCP entry this package created. */
-function uninstall({ acpPatch, webPatch, pluginLink, mcpFiles }) {
+/** Remove every managed row, plugin install, project link, and MCP entry. */
+function uninstall({ acpPatch, webPatch, pluginDir, mcpFiles, project }) {
   for (const [file, begin, end] of [[acpPatch, ACP_BEGIN, ACP_END], [webPatch, PLUGIN_BEGIN, PLUGIN_END]]) {
     if (!fs.existsSync(file)) {
       log(`skipped    ${file} (absent)`)
@@ -497,22 +686,52 @@ function uninstall({ acpPatch, webPatch, pluginLink, mcpFiles }) {
     fs.writeFileSync(file, `${hasRows(kept) ? kept : '[]'}\n`)
     log(`cleaned    ${file}`)
   }
-  removePluginLink(pluginLink)
+  removePluginInstall(pluginDir)
+  for (const link of projectLinks(project)) removeOwnedLink(link)
   for (const file of mcpFiles) unregisterMcpServer(file)
   log('note       the GUI keeps its own workspace registrations; this only unwires the package')
 }
 
-/** Drop the stable plugin path. */
-function removePluginLink(link) {
-  if (!fs.existsSync(link)) {
-    log(`skipped    ${link} (absent)`)
+/** Drop the plugin copy or link under `$DSH_HOME/plugins`. */
+function removePluginInstall(destination) {
+  if (!fs.existsSync(destination) && readlinkOrNull(destination) === null) {
+    log(`skipped    ${destination} (absent)`)
     return
   }
+  if (args['dry-run']) {
+    log(`would remove ${destination}`)
+    return
+  }
+  fs.rmSync(destination, { recursive: true, force: true })
+  log(`removed    ${destination}`)
+}
+
+/** The project entries `wireProject` creates. */
+function projectLinks(project) {
+  return [
+    path.join(project, '.agents', 'mcp-deepseek', 'server.cjs'),
+    path.join(project, '.agents', 'dsh-workspace-attach'),
+    path.join(project, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs'),
+    path.join(project, '.agents', 'skills', 'deepseek-offload', 'references'),
+  ]
+}
+
+/**
+ * Remove one project entry, but only when it resolves into this package —
+ * a project file that merely sits at the same path is never deleted.
+ * @param link - absolute path inside the project.
+ */
+function removeOwnedLink(link) {
+  const target = readlinkOrNull(link)
+  if (target === null) return
+  const resolved = path.resolve(path.dirname(link), target)
+  const owned = resolved === path.resolve(PACKAGE_ROOT) || resolved.startsWith(`${path.resolve(PACKAGE_ROOT)}${path.sep}`)
+  if (!owned) return
   if (args['dry-run']) {
     log(`would remove ${link}`)
     return
   }
-  fs.rmSync(link, { recursive: true, force: true })
+  fs.rmSync(link, { force: true })
   log(`removed    ${link}`)
 }
 

@@ -38,42 +38,36 @@ Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ d
 
 ## Quick start
 
-Add this repository to a project (submodule, subtree, or a plain clone), then install:
+Two commands, from the project you want to delegate from:
 
 ```sh
-git submodule add <this-repo-url> .agents/deepseek-offload
+git submodule add <this-repo-url> .agents/deepseek-offload   # or clone/copy it anywhere
 .agents/deepseek-offload/install.sh --with-mcp-config
 ```
 
-But this repository *is* an `.agents/` tree, so the simplest install is to place it where your
-agent already looks — clone it as `.agents/` itself, or symlink the three entries:
+That is the whole install. `install.sh` is idempotent, so re-running it after an update — or from a
+second project — converges rather than duplicating anything.
 
-```sh
-ln -s ../deepseek-offload/.agents/mcp-deepseek   .agents/mcp-deepseek
-ln -s ../deepseek-offload/.agents/skills/deepseek-offload .agents/skills/deepseek-offload
-ln -s ../deepseek-offload/.agents/dsh-workspace-attach .agents/dsh-workspace-attach
-```
+What it wires, and why each piece is needed:
 
-`install.sh` then wires the Harness side and, with `--with-mcp-config`, writes:
+| Step | What it does |
+| :--- | :--- |
+| Harness profiles | Creates `$DSH_HOME/profiles/{acp,web}` if missing (through `dsh` itself). |
+| `acp` profile | Pins the model every delegated session runs on. |
+| `$DSH_HOME/plugins/dsh-workspace-attach` | Installs the workspace plugin (a copy, so it survives this package moving or being deleted). |
+| Web profile | Adds one fenced loader row pointing at that plugin. |
+| Project `.agents/` | Links the bridge (`.agents/mcp-deepseek/server.cjs`), the runner (`.agents/skills/deepseek-offload/scripts/dsh-offload.mjs`), the plugin, and the skill references into the project. A path the project already has is **never** overwritten. |
+| Project MCP configs | With `--with-mcp-config`: registers `deepseek` in `.mcp.json` (Claude Code) and `.agents/mcp_config.json` (Gemini/Antigravity). |
+| Harness checkout | With `--with-vision-subagent`: adds the `read_image_vision` subagent to the `standard` preset. |
+| Verify | Runs `doctor`: model pin, plugin liveness, GUI URL. |
 
-```json
-{
-  "mcpServers": {
-    "deepseek": {
-      "command": "node",
-      "args": ["/absolute/path/to/.agents/mcp-deepseek/server.cjs"],
-      "env": {
-        "DEEPSEEK_MCP_DEFAULT_CWD": "/absolute/path/to/your-project",
-        "DEEPSEEK_WORKSPACE_ATTACH": "1"
-      }
-    }
-  }
-}
-```
+Flags: `--project DIR` (default: current directory), `--dsh-home DIR`, `--dsh-root DIR`, `--model NAME`,
+`--permission allow|reject` (written into the MCP entry; `reject` for read-only or untrusted
+workspaces), `--with-mcp-config`, `--with-vision-subagent`, `--no-project-links`, `--link-plugin`,
+`--dry-run` (print the plan, write nothing), `--uninstall`, `--json`.
 
-It finishes by running `doctor`, which reports the model pin, whether the workspace plugin is
-answering, and where the GUI is. Then ask the calling agent to use the `deepseek_agent` tool, or run
-a background job directly:
+If the GUI was already running, reload the page once so the new profile row activates — the `web`
+profile is `patchReload: live`, so no restart is needed. Then start a job:
 
 ```sh
 R=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs

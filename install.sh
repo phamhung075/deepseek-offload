@@ -31,6 +31,13 @@ deepseek-offload install.sh
                            else ~/.dsh)
   --with-mcp-config        also register the bridge in .mcp.json and
                            .agents/mcp_config.json for the calling agents
+  --permission allow|reject
+                           permission policy written into that entry
+                           (default: allow — delegated work runs unattended)
+  --no-project-links       do not create the project's .agents entries
+                           (bridge, skill scripts, plugin)
+  --link-plugin            symlink the workspace plugin into $DSH_HOME
+                           instead of copying it (for plugin development)
   --model NAME             model every delegated session runs on
                            (default: $DEEPSEEK_OFFLOAD_MODEL, else
                            deepseek-v4-flash-vision-exp)
