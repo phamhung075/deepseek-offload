@@ -1,17 +1,25 @@
-# deepseek-mcp — Antigravity (Gemini) → DeepSeek bridge
+# deepseek-mcp — MCP bridge to a DeepSeek Harness agent
 
-A zero-dependency **MCP stdio server** that lets Google **Antigravity CLI** delegate
-work to a **DeepSeek Harness** agent and watch the result in the DeepSeek web GUI.
+A zero-dependency **MCP stdio server** that lets any MCP-capable client (Claude Code,
+Antigravity/Gemini CLI, Codex CLI, ...) delegate work to a **DeepSeek Harness** agent and watch the
+result in the DeepSeek web GUI.
 
-> **Claude Code** also connects to this same bridge, through this repo's project-scoped
-> [`.mcp.json`](../../.mcp.json), which registers `deepseek` beside `pdf2w` and resolves the
-> bridge path via `${PROJECTS_ROOT}` (set in Claude Code's global `~/.claude/settings.json`
-> `env` block). It is already trusted and active in this workspace as of 2026-09-11.
+Register it in your client's MCP config (`install.sh --with-mcp-config` writes both shapes):
+
+```json
+{ "mcpServers": { "deepseek": {
+    "command": "node",
+    "args": ["/absolute/path/.agents/mcp-deepseek/server.cjs"],
+    "env": { "DEEPSEEK_MCP_DEFAULT_CWD": "/absolute/path/to/your-project" } } } }
+```
+
+Nothing here needs the Harness source: the bridge runs an installed `dsh` when it finds one, and
+falls back to a source checkout at `$DSH_ROOT` (default `~/deepseek-harness`).
 
 ## How it works
 
 ```
-Antigravity CLI (Gemini, MCP client)
+MCP client (Claude Code / Antigravity / Codex)
         │  MCP over stdio (JSON-RPC 2.0, NDJSON)
         ▼
   server.cjs  (this bridge)
@@ -21,9 +29,11 @@ Antigravity CLI (Gemini, MCP client)
   DeepSeek Harness agent  ── persists session ──►  ~/.dsh/sessions/…  ◄── web GUI reads
 ```
 
-The bridge uses the **same `DSH_HOME` as the web GUI** (`~/.dsh`), so every session
-it creates lands in the shared session store and shows up in the web GUI's session
-list (with its `cwd` set to the workspace).
+The bridge uses the **same `DSH_HOME` as the web GUI** (`~/.dsh`), so every session it creates
+lands in the shared session store and shows up in the web GUI's session list (with its `cwd` set to
+the workspace it ran in). Each result also reports a `Workspace:` line saying whether the GUI filed
+that session under its project folder or left it Ungrouped, and why — see
+[the plugin](../dsh-workspace-attach/README.md).
 
 ## Tools exposed to Antigravity
 
@@ -32,6 +42,7 @@ list (with its `cwd` set to the workspace).
 | `deepseek_agent(prompt, cwd?, mcpConfig?)` | Runs one DeepSeek task in a fresh session; returns the final answer + session id. |
 | `deepseek_list_sessions(cwd?)` | Lists DeepSeek sessions from the shared store. |
 | `deepseek_mcp_servers(mcpConfig?)` | Resolves which MCP servers a delegation would receive, without running an agent. |
+| `deepseek_update_session(sessionId, message?)` | Steers or cancels a session that's still mid-turn in this bridge process: interrupts it (`session/cancel`), then re-prompts the same session with `message` if given (preserving history), or — if `message` is omitted — closes the session normally with no redirect (`stopReason=cancelled`). Errors if the session already finished. |
 
 ## Forwarding MCP servers to the DeepSeek agent
 
@@ -43,12 +54,13 @@ else needs to be maintained.
 ```jsonc
 // .mcp.json — read by Claude Code AND forwarded to DeepSeek
 { "mcpServers": {
-    "pdf2w": { "type": "http", "url": "https://app.pdf2w.com/mcp",
-               "headers": { "Authorization": "Bearer ${PDF2W_API_KEY}" } } } }
+    "docs": { "type": "http", "url": "https://mcp.example.com/mcp",
+              "headers": { "Authorization": "Bearer ${DOCS_API_KEY}" } },
+    "repo": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-git"] } } }
 ```
 
-Then tools reach the model as `mcp__pdf2w__extract_document`,
-`mcp__pdf2w__get_service_health`, and so on.
+A tool on one of those servers reaches the child model as
+`mcp__<serverName>__<toolName>` — e.g. `mcp__docs__search_documents`, `mcp__repo__log`.
 
 Which config applies, in order: the `mcpConfig` tool argument, then
 `DEEPSEEK_MCP_CONFIG`, then none (the default, `mcpServers: []`).
@@ -70,13 +82,15 @@ A server that fails to start aborts `session/new` — DSH reports this as a gene
 
 ## Setup
 
-1. The Antigravity CLI MCP config is already written at
-   [`.agents/mcp_config.json`](../mcp_config.json) (Antigravity CLI reads the
-   workspace-local `.agents/mcp_config.json`; it can also go in
-   `~/.gemini/config/mcp_config.json`).
+1. Register the bridge in your client's MCP config — for Antigravity CLI a
+   workspace-local `.agents/mcp_config.json` (or
+   `~/.gemini/config/mcp_config.json`), for Claude Code `.mcp.json`. `install.sh
+   --with-mcp-config` writes both.
 2. The `acp` DSH profile must exist once: run
-   `cd ~/__projects__/deepseek-harness && pnpm dsh --profile acp --dump-config`
-   (idempotent; it auto-initializes `~/.dsh/profiles/acp`).
+   `dsh --profile acp --dump-config` (idempotent; it auto-initializes
+   `$DSH_HOME/profiles/acp`). From a Harness **source** checkout the launcher is
+   `pnpm dsh --profile acp --dump-config`, which is what the bridge uses when no
+   `dsh` is on `PATH`.
 3. In Antigravity CLI, open the MCP manager (`/mcp`) and confirm the `deepseek`
    server shows as connected, then ask Gemini to "use the deepseek_agent tool".
 
@@ -84,9 +98,10 @@ A server that fails to start aborts `session/new` — DSH reports this as a gene
 
 | Var | Default | Meaning |
 | :--- | :--- | :--- |
-| `DSH_ROOT` | `~/__projects__/deepseek-harness` | DeepSeek Harness checkout (cwd for `dsh`) |
+| `DSH_BIN` | — | Explicit `dsh` executable for the ACP child; overrides PATH lookup and `DSH_ROOT` |
+| `DSH_ROOT` | `~/deepseek-harness` | Harness **source** checkout, used when no `dsh` is on `PATH` |
 | `DSH_HOME` | `~/.dsh` | Must match the web GUI's home so sessions are shared |
-| `DEEPSEEK_MCP_DEFAULT_CWD` | `~/__projects__/markdown-extract-service` | Default working dir for sessions |
+| `DEEPSEEK_MCP_DEFAULT_CWD` | the bridge process cwd | Default working directory for delegated sessions |
 | `DEEPSEEK_MCP_PERMISSION` | `allow` | `allow` auto-accepts tool permission prompts; `reject` denies them |
 | `DEEPSEEK_MCP_TIMEOUT_MS` | `900000` | Prompt timeout |
 | `DEEPSEEK_MCP_CONFIG` | *(unset)* | Default client-shaped MCP config forwarded into every session |

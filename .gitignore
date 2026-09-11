@@ -1,0 +1,5 @@
+# Job records, worker logs, and adopted-session scratch.
+scratch/
+# Local overrides.
+*.local.json
+.DS_Store

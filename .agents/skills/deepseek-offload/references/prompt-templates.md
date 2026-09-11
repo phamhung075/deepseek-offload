@@ -68,7 +68,7 @@ Budget: at most 300 words.
 Start each in its own job so they run concurrently, then collect:
 
 ```sh
-OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
+OFF=.agents/deepseek-offload/runner/dsh-offload.mjs
 node "$OFF" start "<workstream 1 prompt>" --cwd "$PWD" --label ws1
 node "$OFF" start "<workstream 2 prompt>" --cwd "$PWD" --label ws2
 node "$OFF" start "<workstream 3 prompt>" --cwd "$PWD" --label ws3
@@ -113,11 +113,11 @@ node "$OFF" start "<prompt below>" --mcp-config "$PWD/.mcp.json" --label pdf-ext
 ```
 
 ```
-Objective: extract <document> to Markdown using the mcp__pdf2w__extract_document MCP tool.
+Objective: extract <document> to Markdown using the mcp__docs__extract_document MCP tool.
 
 Scope: <absolute path to the input file>. Write the output to scratch/<name>.md only.
 
-Method: call mcp__pdf2w__extract_document exactly once with the file; do not retry more than twice
+Method: call mcp__docs__extract_document exactly once with the file; do not retry more than twice
 on failure, and do not fall back to other tools.
 
 Output contract:

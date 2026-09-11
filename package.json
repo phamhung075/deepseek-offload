@@ -1,5 +1,25 @@
 {
   "name": "deepseek-offload",
-  "description": "MCP bridge and background-job CLI that delegate work from an MCP client to a DeepSeek Harness dsh session.",
-  "private": true
+  "version": "1.0.0",
+  "description": "MCP bridge, background-job runner, and DSH web-profile plugin that delegate work from any MCP client to a DeepSeek Harness (dsh) session, and file those sessions under the project folder they ran in.",
+  "license": "MIT",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/install.test.mjs .agents/dsh-workspace-attach/tests/adopt.test.js .agents/dsh-workspace-attach/tests/inbox.test.js",
+    "install-bridge": "./install.sh",
+    "doctor": "node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs doctor"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "mcp",
+    "acp",
+    "subagent",
+    "delegation",
+    "cordis"
+  ]
 }

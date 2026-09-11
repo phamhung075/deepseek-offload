@@ -1,0 +1,10 @@
+# The web profile loads the workspace plugin, so sessions created by the ACP
+# plane are filed under the project folder they ran in instead of the GUI's
+# "Ungrouped" bucket. Copy this file to
+# $DSH_HOME/profiles/web/cordis.patch.yml (the installer does it, with a stable
+# plugin path under $DSH_HOME/plugins), then reload the GUI.
+- insert:
+    - id: workspace-attach
+      name: '/absolute/path/to/deepseek-offload/.agents/dsh-workspace-attach/index.js'
+      config:
+        intervalMs: 1000

@@ -1,0 +1,31 @@
+diff --git a/packages/preset/agent-presets/presets/standard/agent.cordis.yml b/packages/preset/agent-presets/presets/standard/agent.cordis.yml
+index 63b1798840..85301e4b8c 100644
+--- a/packages/preset/agent-presets/presets/standard/agent.cordis.yml
++++ b/packages/preset/agent-presets/presets/standard/agent.cordis.yml
+@@ -196,6 +196,26 @@
+         toolName: subagent_fork
+         backgroundMode: continuable
+ 
++    # A dedicated image reader: a child pinned to the DeepSeek vision model so a
++    # session can stay on a text-only model (v4-flash / v4-pro) and still read
++    # image files. Fork cannot do this — it inherits the parent's model — so this
++    # stays on the `spawn` backend with a fixed route. `one-shot` waits for the
++    # description inline, and `maxDepth: 1` keeps the reader a leaf (it cannot
++    # delegate further).
++    - id: tool-subagent-read-image
++      name: '@deepseek-ai/dsh-tool-subagent'
++      config:
++        provider: spawn
++        toolName: read_image_vision
++        backgroundMode: one-shot
++        maxDepth: 1
++        agentOptions:
++          provider: deepseek-official
++          model: deepseek-v4-flash-vision-exp
++        persona: >-
++          You are a vision reader. Inspect the image file(s) the task names using the
++          read_image tool and report their contents accurately and completely, then stop.
++
+     # Production dsh does not install these optional providers. Install the
+     # matching Bundle in this Profile and restart the Host, then copy this
+     # preset and remove `disabled` from the matching tool row. Host availability

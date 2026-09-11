@@ -1,0 +1,24 @@
+{
+  "name": "dsh-workspace-attach",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DeepSeek Harness web-profile plugin: files sessions created by the ACP automation plane into a Workspace named after the directory the agent ran in, so delegated jobs stop landing in the GUI's Ungrouped bucket. Drains a request inbox and drives ctx.workspaceRegistry (create + attachSession) inside the GUI process, which is the only writer of the durable workspace account.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

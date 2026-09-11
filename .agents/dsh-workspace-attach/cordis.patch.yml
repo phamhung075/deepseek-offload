@@ -1,0 +1,13 @@
+# Opt-in layer: mount the workspace-attach function plugin over the web profile.
+#
+#   pnpm dsh plugin --profile web add link:<repo>/.agents/dsh-workspace-attach   # install
+#   pnpm dsh web --patch dsh-workspace-attach/cordis.patch.yml                   # or overlay
+#
+# The plugin is the GUI-side half of the ACP delegation bridge: it watches an
+# inbox of "attach this session to this directory" requests written by
+# `.agents/mcp-deepseek/server.cjs` and performs them through the Workspace
+# registry, which only this process may write.
+
+- insert:
+    - id: workspace-attach
+      name: 'dsh-workspace-attach'

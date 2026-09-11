@@ -16,7 +16,7 @@
  * Logs go to stderr only; stdout carries MCP protocol traffic only.
  */
 
-const { spawn } = require('node:child_process')
+const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -25,7 +25,7 @@ const readline = require('node:readline')
 // ---------------------------------------------------------------------------
 // Configuration (env-overridable)
 // ---------------------------------------------------------------------------
-const DSH_ROOT = process.env.DSH_ROOT || path.join(os.homedir(), '__projects__/deepseek-harness')
+const DSH_ROOT = resolveDshRoot()
 // Must match the web GUI's DSH_HOME so sessions land in the shared store.
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const DEFAULT_CWD = process.env.DEEPSEEK_MCP_DEFAULT_CWD || process.cwd()
@@ -55,6 +55,65 @@ function writeMsg(msg) {
 
 function isAbsolutePath(p) {
   return typeof p === 'string' && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p))
+}
+
+/** Resolve an executable name against PATH. */
+function whichSync(name) {
+  const entries = (process.env.PATH || '').split(path.delimiter)
+  const extensions = process.platform === 'win32' ? ['.cmd', '.exe', '.bat', ''] : ['']
+  for (const dir of entries) {
+    if (dir === '') continue
+    for (const extension of extensions) {
+      const candidate = path.join(dir, `${name}${extension}`)
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK)
+        return candidate
+      } catch {
+        // keep looking
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Conventional Harness checkout locations, probed in order. `$DSH_ROOT` wins
+ * outright; the rest are conventions so a checkout does not have to be
+ * announced.
+ * @returns the first existing candidate, or the first convention when none exists.
+ */
+function resolveDshRoot() {
+  const candidates = [
+    process.env.DSH_ROOT,
+    path.join(os.homedir(), 'deepseek-harness'),
+    path.join(os.homedir(), 'projects', 'deepseek-harness'),
+    path.join(os.homedir(), 'src', 'deepseek-harness'),
+    path.join(os.homedir(), '__projects__', 'deepseek-harness'),
+  ]
+  for (const candidate of candidates) {
+    if (candidate !== undefined && fs.existsSync(candidate)) return candidate
+  }
+  return path.join(os.homedir(), 'deepseek-harness')
+}
+
+/**
+ * How to start one ACP session: an installed `dsh` when there is one, otherwise
+ * a source checkout driven through its own launcher — a development checkout
+ * resolves its profiles and plugins only through that launcher.
+ * @returns command, argv, and working directory for the ACP child.
+ */
+function resolveDshLaunch() {
+  const explicit = process.env.DSH_BIN
+  if (explicit !== undefined && explicit !== '') {
+    return { command: explicit, args: ['--profile', 'acp'], cwd: process.cwd() }
+  }
+  const onPath = whichSync('dsh')
+  if (onPath !== null) return { command: onPath, args: ['--profile', 'acp'], cwd: process.cwd() }
+  return {
+    command: process.execPath,
+    args: ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', '--profile', 'acp'],
+    cwd: DSH_ROOT,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +264,153 @@ function describeMcpServers(resolved) {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace grouping (ask the web GUI to file the session under its project)
+// ---------------------------------------------------------------------------
+// The web GUI groups sessions by Workspace, and only the GUI process may write
+// that account: a Workspace's durable state is authoritative in memory, so an
+// out-of-process writer would be invisible and then overwritten. A session
+// created here therefore lands in the GUI's trailing "Ungrouped" bucket unless
+// the GUI is asked to adopt it. The request goes through a file inbox that the
+// `dsh-workspace-attach` plugin (web profile) drains; see
+// `plugin/dsh-workspace-attach/README.md` for the protocol.
+const WORKSPACE_ATTACH = process.env.DEEPSEEK_WORKSPACE_ATTACH !== '0'
+const WORKSPACE_ATTACH_DIR = process.env.DEEPSEEK_WORKSPACE_ATTACH_DIR
+  || path.join(DSH_HOME, 'workspace-attach')
+const WORKSPACE_ATTACH_WAIT_MS = Number(process.env.DEEPSEEK_WORKSPACE_ATTACH_WAIT_MS || 2500)
+/** A heartbeat older than this means the GUI is gone or the plugin stopped. */
+const WORKSPACE_ATTACH_HEARTBEAT_MS = 30000
+
+const WORKSPACE_ATTACH_HINT = 'install/activate the workspace-attach plugin in the web profile, or set DEEPSEEK_WORKSPACE_ATTACH=0 to silence this'
+
+/** Request file the plugin drains; session ids are validated before naming a file. */
+function attachRequestPath(sessionId) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sessionId)) {
+    throw new Error(`refusing to queue a workspace request for suspicious session id ${JSON.stringify(sessionId)}`)
+  }
+  return path.join(WORKSPACE_ATTACH_DIR, `${sessionId}.request.json`)
+}
+
+/** Result file the plugin publishes for a processed request. */
+function attachResultPath(sessionId) {
+  return path.join(WORKSPACE_ATTACH_DIR, `${sessionId}.result.json`)
+}
+
+/** Read a JSON file, treating "absent" and "unreadable" alike. */
+function readJsonIfPresent(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/** Write JSON through a temp file so the plugin never reads a partial request. */
+function writeJsonAtomic(file, value) {
+  const temp = `${file}.${process.pid}.tmp`
+  fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, 'utf8')
+  fs.renameSync(temp, file)
+}
+
+/**
+ * The repository root of a directory, for the request's diagnostics: a job run
+ * in a subdirectory still joins the workspace of the directory it ran in,
+ * because the registry only accepts a session whose stored cwd IS the
+ * workspace path.
+ */
+function projectRootOf(cwd) {
+  try {
+    const out = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    const root = out.status === 0 && typeof out.stdout === 'string' ? out.stdout.trim() : ''
+    return root === '' ? cwd : root
+  } catch {
+    return cwd
+  }
+}
+
+/** Queue one adoption request; returns the request file path. */
+function queueWorkspaceAttach(sessionId, cwd) {
+  const file = attachRequestPath(sessionId)
+  fs.mkdirSync(WORKSPACE_ATTACH_DIR, { recursive: true })
+  const root = projectRootOf(cwd)
+  writeJsonAtomic(file, {
+    v: 1,
+    sessionId,
+    path: cwd,
+    requestedAt: new Date().toISOString(),
+    requestedBy: SERVER_NAME,
+    ...(root === cwd ? {} : { root, nested: true }),
+  })
+  return file
+}
+
+/** Poll for the plugin's answer to one queued request. */
+async function awaitWorkspaceAttach(sessionId, timeoutMs) {
+  const file = attachResultPath(sessionId)
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const result = readJsonIfPresent(file)
+    if (result !== undefined) return result
+    if (Date.now() >= deadline) return undefined
+    await new Promise((resolve) => { setTimeout(resolve, 100) })
+  }
+}
+
+/** Report whether the GUI-side plugin answered recently enough to be trusted. */
+function workspacePluginHeartbeat() {
+  const beat = readJsonIfPresent(path.join(WORKSPACE_ATTACH_DIR, 'heartbeat.json'))
+  if (beat === undefined || typeof beat.at !== 'string') return undefined
+  const age = Date.now() - Date.parse(beat.at)
+  return Number.isFinite(age) && age <= WORKSPACE_ATTACH_HEARTBEAT_MS ? beat : undefined
+}
+
+/**
+ * One status line describing where this session sits in the GUI's grouping —
+ * the whole point being that a caller (and the user reading the transcript)
+ * learns why a job is or is not under its project folder.
+ */
+function describeWorkspaceAttach(result, sessionId) {
+  if (result === undefined) {
+    const beat = workspacePluginHeartbeat()
+    return beat === undefined
+      ? `Workspace: NOT adopted — the web GUI is not running this plugin (${WORKSPACE_ATTACH_HINT}); `
+        + `queued at ${attachResultPath(sessionId)}, so it is adopted when the GUI starts`
+      : 'Workspace: queued — the GUI plugin has not answered yet; the session stays Ungrouped until it does'
+  }
+  if (result.ok === true) {
+    const suffix = result.created === true ? ' (created)' : result.already === true ? ' (already accounted)' : ''
+    return `Workspace: ${result.title}${suffix} — session filed under ${result.path}`
+  }
+  return `Workspace: NOT adopted — ${result.error}`
+}
+
+/** Queue the request before the turn and resolve its outcome after it. */
+function startWorkspaceAttach(sessionId, cwd) {
+  if (!WORKSPACE_ATTACH) return Promise.resolve('Workspace: skipped (DEEPSEEK_WORKSPACE_ATTACH=0)')
+  let queued
+  try {
+    queued = queueWorkspaceAttach(sessionId, cwd)
+  } catch (err) {
+    return Promise.resolve(`Workspace: NOT adopted — could not queue the request: ${err.message}`)
+  }
+  log(`queued workspace adoption for session ${sessionId} at ${queued}`)
+  return awaitWorkspaceAttach(sessionId, WORKSPACE_ATTACH_WAIT_MS)
+    .then((result) => describeWorkspaceAttach(result, sessionId))
+    .catch((err) => `Workspace: NOT adopted — ${err.message}`)
+}
+
+// ---------------------------------------------------------------------------
 // ACP client (talks to `dsh --profile acp`)
 // ---------------------------------------------------------------------------
 let acpNextId = 1
+
+// sessionId -> { client: AcpClient, pendingUpdates: string[] } for sessions currently
+// mid-turn in THIS process, so deepseek_update_session can reach them. A session only
+// lives here while its runAgent() call is between session/new and session/close.
+const activeSessions = new Map()
 
 class AcpClient {
   constructor(permission) {
@@ -219,8 +422,9 @@ class AcpClient {
     this.exitError = null
     this.onText = null // optional callback(text-so-far) for progress
 
-    this.child = spawn(process.execPath, ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', '--profile', 'acp'], {
-      cwd: DSH_ROOT,
+    const launch = resolveDshLaunch()
+    this.child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
       env: { ...process.env, DSH_HOME },
       stdio: ['pipe', 'pipe', 'inherit'],
     })
@@ -320,6 +524,12 @@ class AcpClient {
     })
   }
 
+  /** Fire-and-forget JSON-RPC notification (no id, no response) — e.g. session/cancel. */
+  notify(method, params) {
+    if (this.exited) return
+    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
+  }
+
   dispose() {
     return new Promise((resolve) => {
       if (this.exited) { resolve(); return }
@@ -350,7 +560,7 @@ async function withAcp(permission, fn) {
   }
 }
 
-async function runAgent({ prompt, cwd, onProgress, mcpConfigPath }) {
+async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath }) {
   const startedAt = Date.now()
   // Resolve before spawning ACP so a broken MCP config fails loud, not mid-turn.
   const resolvedMcp = mcpConfigPath ? resolveMcpServers(mcpConfigPath) : null
@@ -363,23 +573,52 @@ async function runAgent({ prompt, cwd, onProgress, mcpConfigPath }) {
       { cwd, mcpServers: resolvedMcp === null ? [] : resolvedMcp.servers },
       60000,
     )
-    if (onProgress) onProgress(`session ${sessionId}`)
+    // A distinct, unthrottled announcement — not routed through onProgress's char-count
+    // heartbeat, which a short "session <id>" string almost never crosses the threshold
+    // for — so a caller can reliably capture the id while the call is still in flight.
+    if (onSessionId) onSessionId(sessionId)
 
-    let result
+    // Queued as soon as the session exists so the GUI can file it under its project
+    // while the turn is still running; the outcome is awaited once, at the end.
+    const workspaceAttach = startWorkspaceAttach(sessionId, cwd)
+
+    // Registered while this session is mid-turn so deepseek_update_session can find it,
+    // queue a follow-up message, and interrupt the current session/prompt via session/cancel.
+    const record = { client, pendingUpdates: [] }
+    activeSessions.set(sessionId, record)
+
+    let stopReason = 'end_turn'
+    let currentPrompt = prompt
     try {
-      result = await client.request(
-        'session/prompt',
-        { sessionId, prompt: [{ type: 'text', text: prompt }] },
-        TIMEOUT_MS,
-      )
-    } catch (err) {
-      // Surface a partial answer plus the failure instead of losing the work.
-      const text = client.collectedText
-      const prefix = text ? `DeepSeek returned partial output before failing:\n\n${text}\n\n---\n` : ''
-      throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}`)
+      for (;;) {
+        let result
+        try {
+          result = await client.request(
+            'session/prompt',
+            { sessionId, prompt: [{ type: 'text', text: currentPrompt }] },
+            TIMEOUT_MS,
+          )
+        } catch (err) {
+          // Surface a partial answer plus the failure instead of losing the work.
+          // The grouping line rides along: a failed job is exactly when someone
+          // goes looking for its session in the GUI.
+          const text = client.collectedText
+          const prefix = text ? `DeepSeek returned partial output before failing:\n\n${text}\n\n---\n` : ''
+          throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}\n${await workspaceAttach}`)
+        }
+        stopReason = result && result.stopReason ? result.stopReason : 'end_turn'
+        // A queued update — from a natural stop, or from session/cancel interrupting this
+        // turn — becomes the next session/prompt on the same session, so history carries over.
+        const next = record.pendingUpdates.length > 0 ? record.pendingUpdates.shift() : undefined
+        if (next === undefined) break
+        currentPrompt = next
+      }
+    } finally {
+      // Delete before session/close: an update landing in that narrow window should see
+      // "not active" rather than a false "queued" that nothing will ever read again.
+      activeSessions.delete(sessionId)
     }
 
-    const stopReason = result && result.stopReason ? result.stopReason : 'end_turn'
     let closed = false
     try { await client.request('session/close', { sessionId }, 30000); closed = true } catch {}
 
@@ -391,6 +630,7 @@ async function runAgent({ prompt, cwd, onProgress, mcpConfigPath }) {
       elapsedMs: Date.now() - startedAt,
       text: client.collectedText,
       mcp: describeMcpServers(resolvedMcp),
+      workspace: await workspaceAttach,
     }
   })
 }
@@ -428,7 +668,7 @@ const TOOLS = [
           description:
             'Optional path to an MCP client config (Claude Code .mcp.json or Gemini mcp_config.json). ' +
             'Its servers are mounted into the DeepSeek session, so the child can call tools like ' +
-            'mcp__pdf2w__extract_document. Defaults to DEEPSEEK_MCP_CONFIG when that is set.',
+            'mcp__docs__extract_document. Defaults to DEEPSEEK_MCP_CONFIG when that is set.',
         },
       },
       required: ['prompt'],
@@ -459,6 +699,31 @@ const TOOLS = [
       properties: {
         cwd: { type: 'string', description: 'Optional absolute working directory filter.' },
       },
+    },
+  },
+  {
+    name: 'deepseek_update_session',
+    description:
+      'Send new information into, or cancel, a DeepSeek session that is STILL RUNNING a deepseek_agent ' +
+      'call in this bridge process. With "message": steer it onto the right track instead of waiting for ' +
+      'it to finish and re-delegating — interrupts the current turn (session/cancel) and re-prompts the ' +
+      'same session with your message once it stops, so conversation history and work so far are ' +
+      'preserved; the eventual deepseek_agent result includes everything from both turns. ' +
+      'Without "message": cancels the current turn with no follow-up prompt, so the session closes ' +
+      'normally and deepseek_agent returns with stopReason=cancelled — use this to stop a run outright. ' +
+      'Only works for a session this same bridge process is currently holding open (see deepseek_agent\'s ' +
+      'returned session id); if the session already finished, this returns an error — use ' +
+      'deepseek_list_sessions or the job result instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'The session id to steer or cancel, from deepseek_agent\'s result.' },
+        message: {
+          type: 'string',
+          description: 'New information or corrected direction. Omit entirely to cancel with no redirect.',
+        },
+      },
+      required: ['sessionId'],
     },
   },
 ]
@@ -506,13 +771,15 @@ async function handleToolsCall(id, params) {
         }
       }
       notifyProgress(progressToken, 0, `Starting DeepSeek agent in ${cwd}…`)
+      const onSessionId = (sid) => notifyProgress(progressToken, 0, `session=${sid}`)
 
-      const out = await runAgent({ prompt, cwd, onProgress, mcpConfigPath })
+      const out = await runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
 
       const header = [
         `DeepSeek agent finished (stopReason=${out.stopReason}, ${out.elapsedMs}ms, session=${out.sessionId})`,
         `Session is persisted and viewable in the DeepSeek web GUI. cwd=${out.cwd}`,
         out.mcp,
+        out.workspace,
         '',
         out.text || '(no text output)',
       ].join('\n')
@@ -558,6 +825,38 @@ async function handleToolsCall(id, params) {
         return `- ${s.sessionId}  cwd=${s.cwd}  updated=${updated}  ${title}`
       })
       respondResult(id, { content: [{ type: 'text', text: `${sessions.length} session(s):\n${lines.join('\n')}` }] })
+      return
+    }
+
+    if (name === 'deepseek_update_session') {
+      const sessionId = args.sessionId
+      const message = typeof args.message === 'string' ? args.message.trim() : ''
+      if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+        respondResult(id, { content: [{ type: 'text', text: 'Error: "sessionId" (string) is required.' }], isError: true })
+        return
+      }
+      const record = activeSessions.get(sessionId)
+      if (!record) {
+        respondResult(id, {
+          content: [{ type: 'text', text:
+            `Error: session ${sessionId} is not active in this bridge process — it may already have ` +
+            'finished (check deepseek_list_sessions or the job result) or belongs to a different process.' }],
+          isError: true,
+        })
+        return
+      }
+      // A message queues a redirect; omitting it leaves the queue empty so runAgent's
+      // loop, seeing nothing pending once the cancelled turn resolves, closes the
+      // session normally instead of re-prompting — a bare stop, not a steer.
+      if (message !== '') record.pendingUpdates.push(message)
+      record.client.notify('session/cancel', { sessionId })
+      respondResult(id, {
+        content: [{ type: 'text', text: message !== ''
+          ? `Update queued for session ${sessionId}. Any in-flight turn is being interrupted; ` +
+            'your message will be sent as the next prompt on the same session.'
+          : `Cancel requested for session ${sessionId}. The in-flight turn is being interrupted with no ` +
+            'follow-up prompt, so the session will close normally (stopReason=cancelled).' }],
+      })
       return
     }
 
