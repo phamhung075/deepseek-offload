@@ -9,8 +9,8 @@ description: >-
   background job runner in .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (including `update` to steer,
   `cancel` to stop a still-running job, `window` to check DeepSeek's peak/off-peak
   pricing, and `start --defer-to-off-peak` to schedule batch work for half price),
-  how to hand the user a followable session id in the DeepSeek web GUI, prompt
-  contracts for self-contained jobs, and the security and token rules.
+  how to follow a running job (the web GUI lists its session but cannot show it
+  live), prompt contracts for self-contained jobs, and the security and token rules.
 ---
 
 # DeepSeek Background Offload — delegating work from other LLMs
@@ -20,11 +20,12 @@ push work **into a DeepSeek Harness session that runs in the background** and re
 short text result. The DeepSeek side does the reading, scanning, grepping, drafting and
 verifying; the calling model pays only for the prompt and the report.
 
-> **The user follows every job live.** Each job is a real DSH session persisted to the shared
-> session store (`DSH_HOME`, default `~/.dsh`), so it appears in the DeepSeek web GUI at
-> `http://127.0.0.1:3080` under the project folder it ran in. `start` / `status` always print
-> the session id so the human can open it, watch the run, and take over the conversation if
-> needed.
+> **The user cannot watch a job run in the web GUI.** Each job is a real DSH session persisted
+> to the shared session store (`DSH_HOME`, default `~/.dsh`), so its row appears in the DeepSeek
+> web GUI at `http://127.0.0.1:3080` under the project folder it ran in — while the row stays idle
+> and its transcript never advances. `start` / `status` print the session id, and
+> `scripts/session-tail.mjs` follows the run from the durable log. See "Following a running job"
+> below.
 >
 > **Paths in this skill are relative to this package**, which is an `.agents/` tree. A project
 > either links those entries into its own `.agents/` (then `.agents/mcp-deepseek/server.cjs` is that
@@ -34,6 +35,32 @@ verifying; the calling model pays only for the prompt and the report.
 > connected.
 
 ---
+
+## Following a running job
+
+**The web GUI cannot show a job running, and reloading does not change that.** Verified 2026-09-13
+against the Harness source (`packages/api/session-controller/src/list.ts`, `history.ts`):
+
+- The row **is** in the sidebar under the project folder: the session list enumerates the durable
+  store, and `dsh-workspace-attach` files the job's session into that Workspace.
+- The row stays **idle** for the whole run. The GUI derives `running` from the agents inside its own
+  process, and every session it does not host reads `running: false`; a job runs in the separate
+  `dsh --profile acp` child the bridge spawns.
+- The transcript **freezes at open time**: the GUI's follow stream carries only events raised inside
+  the GUI process, and nothing watches the session file that child appends to.
+- **Never prompt the job's row in the GUI.** That activates the GUI's own agent for the same session
+  id instead of reaching the child. Steer a running job with `update`, which uses the worker socket.
+
+Follow a run from the durable log — append-only Zstandard, one frame per append, JSONL inside —
+which `scripts/session-tail.mjs` walks for you:
+
+```sh
+TAIL=.agents/skills/deepseek-offload/scripts/session-tail.mjs
+node "$TAIL" <jobId> --lines 20    # newest tool calls, steps and messages
+node "$TAIL" <jobId> --watch       # poll until the job settles, then print state and report path
+```
+
+Report those progress lines to the user: the GUI cannot give them.
 
 ## 1. When to offload, and when not to
 
@@ -67,7 +94,8 @@ Claude Code / Gemini / Codex / any MCP client
 
 - The bridge is zero-dependency CJS speaking MCP (JSON-RPC 2.0, NDJSON) on stdin/stdout.
 - It spawns `dsh --profile acp` from `DSH_ROOT` (default `~/deepseek-harness`).
-- It shares `DSH_HOME` with the web GUI — that's what makes every session followable.
+- It shares `DSH_HOME` with the web GUI, which is what puts every session in the GUI's
+  session list. The GUI reads that list cold: it cannot show a session running elsewhere.
 
 ---
 
@@ -156,7 +184,7 @@ node "$OFF" update  <jobId> "<new information / corrected direction>"
 node "$OFF" cancel  <jobId>               # stop outright, no redirect
 node "$OFF" wait    <jobId> --timeout-ms 900000
 node "$OFF" list    --all
-node "$OFF" sessions --cwd "$PWD"        # what the web GUI shows
+node "$OFF" sessions --cwd "$PWD"        # sessions in the shared store the GUI lists
 node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the child would get
 ```
 
@@ -165,11 +193,11 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `doctor` | Checks node, bridge, `DSH_HOME`, model patch, MCP config, job-store writability. | `0` ok, `1` fail |
 | `window` | Reports whether DeepSeek pricing is peak or off-peak right now, and when it next flips — see "Off-peak planning" below. | `0` |
 | `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. `--detach` returns instantly. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
-| `status` | Job state, session id, elapsed time, GUI hint; `--log` adds the worker log. | `0` |
+| `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
 | `result` | Final report text. | `0` done, `1` error, `2` still running |
 | `update` | Relays new information to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
-| `wait` | Prints the job header at once — session id and follow link included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
+| `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
 | `list` | Recent jobs, newest first; `--all` for every job. | `0` |
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
@@ -178,8 +206,10 @@ Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-conf
 `--label NAME`, `--permission allow|reject`, `--timeout-ms N`, `--detach`, `--wait-session-ms N`,
 `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
 
-Report the `session` id from `start`/`status` to the user verbatim — that's how they watch the run
-in the GUI. Jobs are detached: they keep running after the launching session ends.
+Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
+shows for it: an idle row under the project folder, never live progress. Report progress yourself
+from `scripts/session-tail.mjs`. Jobs are detached: they keep running after the launching session
+ends.
 
 **Parallel fan-out:** start one job per independent workstream, then `wait` on each. Session ids
 are attributed by diffing the session list against pre-existing ids, so concurrent jobs don't
@@ -288,10 +318,11 @@ original session in the GUI.
 | Symptom | Cause and fix |
 | :--- | :--- |
 | `doctor` FAIL: bridge not found | Wrong layout — the runner expects `.agents/mcp-deepseek/server.cjs` beside it, i.e. the submodule checked out whole. |
-| Session never appears in the GUI | `DSH_HOME` mismatch — GUI and bridge must share `~/.dsh`. |
+| Session never appears in the GUI at all | `DSH_HOME` mismatch — GUI and bridge must share `~/.dsh`. |
+| Job row is in the GUI but idle, and its transcript never updates | Expected, not a fault: the GUI cannot host or stream a session another process runs. Follow it with `scripts/session-tail.mjs <jobId> --watch`. |
 | `dsh --profile acp exited with code …` | `acp` profile not initialized: `cd ~/deepseek-harness && pnpm dsh --profile acp --dump-config`. |
 | Job `state: error`, worker gone | Worker died (crash/reboot) — read `scratch/dsh-offload/jobs/<jobId>.worker.log`. |
-| `wait` times out, job still running | Not stuck — raise `--timeout-ms`; check `status`/GUI for live progress. |
+| `wait` times out, job still running | Not stuck — raise `--timeout-ms`; check `status`, or follow the session log with `scripts/session-tail.mjs <jobId> --watch`. |
 | Result ends mid-sentence | ACP prompt timeout (`DEEPSEEK_MCP_TIMEOUT_MS`) — split the job or raise it. |
 | `does not declare image input` on an image job | The pinned id is absent from the `acp` profile's model catalog, which a patch replaces: re-run `install.sh`, then `doctor` (`model accepts images`). |
 | `session/new` fails with bare `Internal error` | A forwarded MCP server didn't start — run `mcp-servers --mcp-config <file>` to find which. |

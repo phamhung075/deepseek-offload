@@ -135,6 +135,7 @@ The bridge opens a **new session per call** and cannot resume an existing one. S
 
 - For another agent-side round, start a new job and paste the previous report (or its path) as
   input, stating what changed.
-- For a human-driven follow-up, hand the user the session id: they can open that session in the
-  DeepSeek web GUI at `http://127.0.0.1:3080` and continue the conversation there, with the
-  original context intact.
+- For a human-driven follow-up, hand the user the session id. The GUI lists that session but
+  cannot stream it while the job runs; follow the run with
+  `scripts/session-tail.mjs <jobId> --watch`, and ask the user to open it in the DeepSeek web GUI
+  at `http://127.0.0.1:3080` afterwards if they want the full transcript.

@@ -1,8 +1,9 @@
 # deepseek-mcp — MCP bridge to a DeepSeek Harness agent
 
 A zero-dependency **MCP stdio server** that lets any MCP-capable client (Claude Code,
-Antigravity/Gemini CLI, Codex CLI, ...) delegate work to a **DeepSeek Harness** agent and watch the
-result in the DeepSeek web GUI.
+Antigravity/Gemini CLI, Codex CLI, ...) delegate work to a **DeepSeek Harness** agent and read the
+result from the shared session store — in the DeepSeek web GUI's session list, or live through
+`../skills/deepseek-offload/scripts/session-tail.mjs`.
 
 Register it in your client's MCP config (`install.sh --with-mcp-config` writes both shapes):
 
@@ -34,6 +35,10 @@ lands in the shared session store and shows up in the web GUI's session list (wi
 the workspace it ran in). Each result also reports a `Workspace:` line saying whether the GUI filed
 that session under its project folder or left it Ungrouped, and why — see
 [the plugin](../dsh-workspace-attach/README.md).
+
+The GUI lists that session cold: it cannot show it **running** while the job works, and it cannot
+stream a transcript the job is still appending to. Both need
+`../skills/deepseek-offload/scripts/session-tail.mjs <jobId> --watch`.
 
 ## Tools exposed to Antigravity
 
@@ -131,5 +136,7 @@ entry patched by `cordis.patch.yml`), or `dsh-offload doctor`.
   local stdio server — for that, expose this bridge behind a remote MCP
   (Streamable HTTP) endpoint instead.
 - One `dsh --profile acp` process is spawned per tool call (a few seconds of
-  boot overhead). The session it creates is persisted, so you can always resume
-  it in the web GUI rather than re-running.
+  boot overhead). The session it creates is persisted, so its full transcript can
+  be read after the run instead of re-running the work — from the web GUI's
+  session list (cold, with no live progress while it runs) or live with
+  `../skills/deepseek-offload/scripts/session-tail.mjs`.

@@ -3,8 +3,10 @@
 Delegate long, token-heavy, or parallelizable work from any MCP-capable agent (Claude Code,
 Gemini/Antigravity, Codex CLI, ...) to a background [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 (`dsh`) session. The calling agent pays only for the prompt and the final report; the DeepSeek
-session does the reading, scanning, drafting, and verifying, and the human can follow it live in
-the DSH web GUI — filed under the project folder it ran in, not in an "Ungrouped" bucket.
+session does the reading, scanning, drafting, and verifying. The job's session is filed in the
+DSH web GUI under the project folder it ran in rather than an "Ungrouped" bucket, but the GUI
+cannot show it running or stream it — follow a live run with
+`.agents/skills/deepseek-offload/scripts/session-tail.mjs <jobId> --watch`.
 
 ```
 Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ dsh --profile acp ──▶ DSH session
@@ -77,7 +79,7 @@ profile is `patchReload: live`, so no restart is needed. Then start a job:
 ```sh
 R=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
 node "$R" start "<self-contained task>" --label my-job
-node "$R" status <jobId>      # state, session id, workspace, GUI link
+node "$R" status <jobId>      # state, session id, workspace, follow command
 node "$R" result <jobId>      # the final report
 ```
 

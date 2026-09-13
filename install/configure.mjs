@@ -292,8 +292,12 @@ function summarise(project) {
   const shown = relative === '' || relative.startsWith('..') ? runner : relative
   log('')
   log('next steps')
+  const tailer = path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs')
+  const tailRelative = path.relative(project, tailer)
+  const tailShown = tailRelative === '' || tailRelative.startsWith('..') ? tailer : tailRelative
   log(`  1. start a job:  cd ${project} && node ${shown} start "<task>" --label my-job`)
-  log('  2. follow it:    http://127.0.0.1:3080/  (sessions are filed under the project folder)')
+  log(`  2. follow it:    node ${tailShown} <jobId> --watch`)
+  log('                   (the GUI files the job under the project folder, but cannot show it live)')
   log('  3. if the GUI was already running, reload the page so the new profile row activates')
 }
 

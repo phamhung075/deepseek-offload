@@ -18,6 +18,10 @@ The registry cannot be written from outside the GUI either: its durable state is
 memory, so an out-of-process writer is invisible to the running GUI and is overwritten by the GUI's
 next Workspace mutation. The GUI process has to perform the attach, so the bridge asks it to.
 
+Filing is all this plugin can do. The row it creates still reads idle and its transcript still
+freezes at open time, because the GUI streams only the sessions its own process runs; follow a live
+job with `../skills/deepseek-offload/scripts/session-tail.mjs <jobId> --watch`.
+
 ## Protocol
 
 The inbox defaults to `$DSH_HOME/workspace-attach` (`DSH_WORKSPACE_ATTACH_DIR` overrides it).

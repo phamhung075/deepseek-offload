@@ -6,7 +6,8 @@
  * `bridge/server.cjs`. It does not reimplement ACP: it speaks MCP
  * over stdio to that bridge, exactly like an MCP-enabled editor would, so every
  * job it starts is a real DSH session persisted to the shared session store
- * (`DSH_HOME`, default `~/.dsh`) that the DeepSeek web GUI lists.
+ * (`DSH_HOME`, default `~/.dsh`) that the DeepSeek web GUI lists — cold: the
+ * GUI cannot show a session another process is running.
  *
  * The bridge's `deepseek_agent` tool blocks until the task finishes. This script
  * adds the missing background half: `start` returns a job id immediately,
@@ -58,6 +59,21 @@ const DEFAULT_CWD = process.env.DEEPSEEK_MCP_DEFAULT_CWD || PROJECT_ROOT
 const DEFAULT_PERMISSION = process.env.DEEPSEEK_MCP_PERMISSION || 'allow'
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEEPSEEK_MCP_TIMEOUT_MS || 15 * 60 * 1000)
 const GUI_URL = process.env.DSH_GUI_URL || 'http://127.0.0.1:3080'
+
+/** Sibling live tailer: the only way to follow a run the GUI cannot stream. */
+const SESSION_TAIL = path.join(path.dirname(fileURLToPath(import.meta.url)), 'session-tail.mjs')
+
+/**
+ * The command a caller runs to follow one job's session log. A project that
+ * links the tailer into its own `.agents/` tree gets the short relative path.
+ * @param jobId - job whose session log the caller wants to follow.
+ * @returns the shell command to run.
+ */
+function followCommand(jobId) {
+  const linked = path.join(process.cwd(), '.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs')
+  const shown = fs.existsSync(linked) ? path.relative(process.cwd(), linked) : SESSION_TAIL
+  return `node ${shown} ${jobId} --watch`
+}
 const SESSION_DISCOVERY_TIMEOUT_MS = 90_000
 const POLL_INTERVAL_MS = 3_000
 
@@ -925,7 +941,8 @@ function describeJob(job, { full = false } = {}) {
   else lines.push('mcp       (none)')
   if (job.error) lines.push(`error     ${job.error.split('\n')[0]}`)
   if (job.resultFile) lines.push(`result    ${job.resultFile}`)
-  lines.push(`follow    ${GUI_URL}  → session list for ${job.cwd}`)
+  lines.push(`follow    ${followCommand(job.jobId)}`)
+  lines.push(`gui       ${GUI_URL}  → session list for ${job.cwd} (row stays idle while the job runs)`)
   if (!full && job.sessionId) lines.push('', `next      dsh-offload result ${job.jobId}`)
   return lines.join('\n')
 }
@@ -987,7 +1004,7 @@ async function commandStart(positional, flags) {
   if (deferredUntil !== null) {
     const job = readJob(jobId)
     if (flags.json === true) {
-      print({ ...job, resultFile: null, followUrl: `${GUI_URL}/#sessions` }, true)
+      print({ ...job, resultFile: null, followUrl: `${GUI_URL}/#sessions`, followCommand: followCommand(job.jobId) }, true)
       return 0
     }
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -1011,7 +1028,7 @@ async function commandStart(positional, flags) {
   }
 
   if (flags.json === true) {
-    print({ ...job, resultFile: job.resultFile ?? null, followUrl: `${GUI_URL}/#sessions` }, true)
+    print({ ...job, resultFile: job.resultFile ?? null, followUrl: `${GUI_URL}/#sessions`, followCommand: followCommand(job.jobId) }, true)
     return 0
   }
   process.stdout.write(`${describeJob(job)}\n`)
@@ -1036,7 +1053,8 @@ function commandStatus(positional, flags) {
   process.stdout.write(`${describeJob(job)}\n`)
   if (job.state === 'running') {
     process.stdout.write(`progress  ${job.progressChars} chars streamed at last notification\n`)
-    process.stdout.write(`\nThe session is live in the web GUI; open it to watch the run in real time.\n`)
+    process.stdout.write('\nThe GUI lists this session but cannot show it running; follow it with:\n')
+    process.stdout.write(`  ${followCommand(jobId)}\n`)
   }
   if (flags.log === true && fs.existsSync(workerLogFile(jobId))) {
     process.stdout.write(`\n--- worker log ---\n${fs.readFileSync(workerLogFile(jobId), 'utf8')}`)
@@ -1288,7 +1306,7 @@ async function commandSessions(positional, flags) {
     print({ sessions: parseSessionIds(text), raw: text }, true)
     return 0
   }
-  process.stdout.write(`${text}\n\nGUI: ${GUI_URL}\n`)
+  process.stdout.write(`${text}\n\nGUI session list (cold — it cannot stream a running job): ${GUI_URL}\n`)
   return 0
 }
 
