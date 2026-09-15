@@ -1,12 +1,33 @@
 # deepseek-offload
 
-Delegate long, token-heavy, or parallelizable work from any MCP-capable agent (Claude Code,
-Gemini/Antigravity, Codex CLI, ...) to a background [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
-(`dsh`) session. The calling agent pays only for the prompt and the final report; the DeepSeek
-session does the reading, scanning, drafting, and verifying. The job's session is filed in the
-DSH web GUI under the project folder it ran in rather than an "Ungrouped" bucket, but the GUI
+**What it does.** deepseek-offload lets an MCP-capable coding agent (Claude Code,
+Gemini/Antigravity, Codex CLI, ...) hand a long, token-heavy, or parallelizable task to a background
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) session. The background
+session does the reading, scanning, drafting, and verifying, then returns a short text report.
+
+**Why you'd want it.** The calling agent pays only for the prompt and the final report, so heavy work
+stops filling its own context window and token budget. Jobs run detached, so you can start several
+and keep working while they run.
+
+**Good to know before you start.** Setup is two commands (see [Quick start](#quick-start)), and the
+safety defaults and review rules are in [Security notes](#security-notes). The job's session is filed
+in the DSH web GUI under the project folder it ran in rather than an "Ungrouped" bucket, but the GUI
 cannot show it running or stream it — follow a live run with
 `.agents/skills/deepseek-offload/scripts/session-tail.mjs <jobId> --watch`.
+
+## Key terms
+
+- **MCP** — the protocol an AI client uses to call external tools; the calling agent reaches this
+  tool through an MCP server.
+- **Bridge** — the local process (`server.cjs`) that speaks MCP to your client and translates the
+  request for the Harness.
+- **ACP** — the protocol the bridge speaks to the Harness child (`dsh --profile acp`) it spawns.
+- **Profile** — a named Harness configuration (`acp`, `web`) stored under `$DSH_HOME`.
+- **`DSH_HOME`** — the Harness data directory holding sessions and profiles (default `~/.dsh`); the
+  bridge and the web GUI must share it.
+- **Workspace** — the web GUI's grouping of sessions by the project folder they ran in.
+
+## How a job flows
 
 ```
 Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ dsh --profile acp ──▶ DSH session
@@ -16,7 +37,12 @@ Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ d
                               $DSH_HOME/workspace-attach ──▶ GUI plugin ──▶ Workspace "my-project"
 ```
 
+The top row is the delegation path; the lower branch is how the finished session gets filed under
+your project's Workspace instead of "Ungrouped".
+
 ## What is in here
+
+You do not need to read every piece; this table maps each path to the role it plays.
 
 | Path | Role |
 | --- | --- |
