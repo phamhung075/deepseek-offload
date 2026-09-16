@@ -89,7 +89,7 @@ What it wires, and why each piece is needed:
 | `acp` profile | Pins the model every delegated session runs on, and declares the provider's model catalog with that id: a patch **replaces** the catalog, and an id it does not carry resolves as text-only, so image jobs would be refused. |
 | `$DSH_HOME/plugins/dsh-workspace-attach` | Installs the workspace plugin (a copy, so it survives this package moving or being deleted). |
 | Web profile | Adds one fenced loader row pointing at that plugin. |
-| Project `.agents/` | Links the bridge (`.agents/mcp-deepseek/server.cjs`), the runner (`.agents/skills/deepseek-offload/scripts/dsh-offload.mjs`), the plugin, and the skill references into the project. A path the project already has is **never** overwritten. |
+| Project `.agents/` | Links the bridge (`.agents/mcp-deepseek/server.cjs`), the plugin, and the skill — its `SKILL.md`, both runner scripts, and its references — into the project. A path the project already has is **never** overwritten. |
 | Project MCP configs | With `--with-mcp-config`: registers `deepseek` in `.mcp.json` (Claude Code) and `.agents/mcp_config.json` (Gemini/Antigravity). |
 | Harness checkout | With `--with-vision-subagent`: adds the `read_image_vision` subagent to the `standard` preset. |
 | Verify | Runs `doctor`: model pin, plugin liveness, GUI URL. |

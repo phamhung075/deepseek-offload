@@ -1,18 +1,39 @@
 /**
- * Installer text-surgery tests. The profile patches are user-owned files with
- * `!!js` expressions and comments, so the updater edits text rather than
- * parsing YAML — these tests pin the shapes it must leave alone and the ones it
- * must replace.
+ * Installer text-surgery and project-wiring tests. The profile patches are
+ * user-owned files with `!!js` expressions and comments, so the updater edits
+ * text rather than parsing YAML — these tests pin the shapes it must leave
+ * alone and the ones it must replace.
  *
  * Run: node --test tests/
  */
 
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
-import { acpCatalogRows, hasRows, stripFencedBlock, stripLoaderRow } from '../install/configure.mjs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { afterEach, test } from 'node:test'
+import { acpCatalogRows, hasRows, linkEntry, projectLinks, stripFencedBlock, stripLoaderRow } from '../install/configure.mjs'
 
 const FENCE = '# bridge: begin'
 const FENCE_END = '# bridge: end'
+
+const roots = []
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+/** A scratch directory removed when the test finishes. */
+function scratch(prefix) {
+  const root = mkdtempSync(join(tmpdir(), `offload-${prefix}-`))
+  roots.push(root)
+  return root
+}
+
+/** A file at `file`, with its parent directories created. */
+function seed(file, content = '// seeded\n') {
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, content)
+}
 
 test('the catalog declares image input only for the ids that accept it', () => {
   const rows = acpCatalogRows('deepseek-flash')
@@ -129,4 +150,58 @@ test('an absent row reports no change', () => {
   assert.equal(removed, false)
   assert.match(text, /- id: acp/)
   assert.match(source, /workspace-attach/)
+})
+
+test('the project gains the skill entry point and both scripts, not just their directory', () => {
+  const project = scratch('links')
+  const entries = projectLinks(project).map(({ link, target }) => ({
+    link: relative(project, link).split(sep).join('/'),
+    target,
+  }))
+  assert.deepEqual(entries.map(({ link }) => link), [
+    '.agents/mcp-deepseek/server.cjs',
+    '.agents/dsh-workspace-attach',
+    '.agents/skills/deepseek-offload/SKILL.md',
+    '.agents/skills/deepseek-offload/scripts/dsh-offload.mjs',
+    '.agents/skills/deepseek-offload/scripts/session-tail.mjs',
+    '.agents/skills/deepseek-offload/references',
+  ])
+  for (const { target } of entries) assert.equal(existsSync(target), true, `the package ships ${target}`)
+})
+
+test('a package inside the project is linked relatively, however far the path climbs', () => {
+  const project = scratch('inside')
+  const target = join(project, '.agents', 'deepseek-offload', '.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs')
+  seed(target)
+  const link = join(project, '.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs')
+
+  linkEntry(project, link, target)
+
+  assert.equal(lstatSync(link).isSymbolicLink(), true)
+  assert.equal(isAbsolute(readlinkSync(link)), false, 'a relative link stays correct when the checkout moves')
+  assert.equal(realpathSync(link), realpathSync(target))
+})
+
+test('a package outside the project is linked absolutely, not through unrelated directories', () => {
+  const project = scratch('outside')
+  const target = join(scratch('package'), 'bridge.cjs')
+  seed(target)
+  const link = join(project, '.agents', 'mcp-deepseek', 'server.cjs')
+
+  linkEntry(project, link, target)
+
+  assert.equal(readlinkSync(link), target)
+  assert.equal(existsSync(link), true)
+})
+
+test('a project child whose name begins with dots is inside, not a climb out', () => {
+  const project = scratch('dots')
+  const target = join(project, '..shared', 'bridge.cjs')
+  seed(target)
+  const link = join(project, '.agents', 'mcp-deepseek', 'server.cjs')
+
+  linkEntry(project, link, target)
+
+  assert.equal(isAbsolute(readlinkSync(link)), false)
+  assert.equal(realpathSync(link), realpathSync(target))
 })

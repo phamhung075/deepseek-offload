@@ -72,8 +72,8 @@ const args = parseArgs(process.argv.slice(2))
 const log = (...parts) => process.stdout.write(`${parts.join(' ')}\n`)
 const warn = (...parts) => process.stderr.write(`deepseek-offload: ${parts.join(' ')}\n`)
 
-/** Text-surgery helpers, exported for tests; `main` is the only entry point. */
-export { acpCatalogRows, hasRows, stripFencedBlock, stripLoaderRow }
+/** Text-surgery and project-wiring helpers, exported for tests; `main` is the only entry point. */
+export { acpCatalogRows, hasRows, linkEntry, projectLinks, stripFencedBlock, stripLoaderRow }
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main()
@@ -213,21 +213,16 @@ function wireProject(project) {
     log('note       project entries skipped: the project is this package')
     return
   }
-  const entries = [
-    { link: path.join(project, '.agents', 'mcp-deepseek', 'server.cjs'), target: path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'server.cjs') },
-    { link: path.join(project, '.agents', 'dsh-workspace-attach'), target: path.join(PACKAGE_ROOT, '.agents', 'dsh-workspace-attach') },
-    { link: path.join(project, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs'), target: path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs') },
-    { link: path.join(project, '.agents', 'skills', 'deepseek-offload', 'references'), target: path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'references') },
-  ]
-  for (const entry of entries) linkEntry(entry.link, entry.target)
+  for (const { link, target } of projectLinks(project)) linkEntry(project, link, target)
 }
 
 /**
  * Create one symlink into the package, unless the project already has that path.
+ * @param project - absolute project directory the link lives in.
  * @param link - absolute path inside the project.
  * @param target - absolute path inside the package.
  */
-function linkEntry(link, target) {
+function linkEntry(project, link, target) {
   if (fs.existsSync(link) || isDanglingLink(link)) {
     const suffix = path.relative(PACKAGE_ROOT, target)
     const satisfied = fs.existsSync(link)
@@ -245,11 +240,11 @@ function linkEntry(link, target) {
     return
   }
   fs.mkdirSync(path.dirname(link), { recursive: true })
-  const relative = path.relative(path.dirname(link), target)
-  // A short relative target keeps a checkout portable; one that climbs out of
-  // the project into an unrelated tree is clearer as an absolute path.
-  const climbs = relative.startsWith(['..', '..', '..'].join(path.sep))
-  const linked = climbs || relative.length > target.length ? target : relative
+  // A target inside the project takes a relative link, which stays correct
+  // wherever the checkout is moved. A package installed outside it is clearer
+  // as an absolute path: the relative one exists, but reads as a climb through
+  // directories the link has nothing to do with.
+  const linked = isInside(project, target) ? path.relative(path.dirname(link), target) : target
   try {
     fs.symlinkSync(linked, link)
     if (!fs.existsSync(link)) throw new Error('the new link does not resolve')
@@ -261,6 +256,17 @@ function linkEntry(link, target) {
     fs.cpSync(target, link, { recursive: true })
     log(`copied     ${link} (symlink unavailable: ${error.message})`)
   }
+}
+
+/**
+ * Whether a path is the root itself or lies below it.
+ * @param root - absolute directory path.
+ * @param target - absolute path to test.
+ * @returns true when `target` resolves inside `root`.
+ */
+function isInside(root, target) {
+  const relative = path.relative(root, target)
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`))
 }
 
 /** Whether a path is a symlink whose target is missing. */
@@ -765,7 +771,7 @@ function uninstall({ acpPatch, webPatch, pluginDir, mcpFiles, project }) {
     log(`cleaned    ${file}`)
   }
   removePluginInstall(pluginDir)
-  for (const link of projectLinks(project)) removeOwnedLink(link)
+  for (const { link } of projectLinks(project)) removeOwnedLink(link)
   for (const file of mcpFiles) unregisterMcpServer(file)
   log('note       the GUI keeps its own workspace registrations; this only unwires the package')
 }
@@ -784,13 +790,24 @@ function removePluginInstall(destination) {
   log(`removed    ${destination}`)
 }
 
-/** The project entries `wireProject` creates. */
+/** The project entries `wireProject` creates, and the ones `uninstall` removes. */
 function projectLinks(project) {
+  const skill = path.join('.agents', 'skills', 'deepseek-offload')
+  const entry = subpath => ({
+    link: path.join(project, skill, subpath),
+    target: path.join(PACKAGE_ROOT, skill, subpath),
+  })
   return [
-    path.join(project, '.agents', 'mcp-deepseek', 'server.cjs'),
-    path.join(project, '.agents', 'dsh-workspace-attach'),
-    path.join(project, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs'),
-    path.join(project, '.agents', 'skills', 'deepseek-offload', 'references'),
+    { link: path.join(project, '.agents', 'mcp-deepseek', 'server.cjs'), target: path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'server.cjs') },
+    { link: path.join(project, '.agents', 'dsh-workspace-attach'), target: path.join(PACKAGE_ROOT, '.agents', 'dsh-workspace-attach') },
+    // `SKILL.md` is what makes the directory a skill the calling agent loads,
+    // and `session-tail.mjs` is the tailer every doc tells the reader to run.
+    // The directory is entered rather than linked whole so a project keeping
+    // its own `SKILL.md` still gains the rest.
+    entry('SKILL.md'),
+    entry(path.join('scripts', 'dsh-offload.mjs')),
+    entry(path.join('scripts', 'session-tail.mjs')),
+    entry('references'),
   ]
 }
 

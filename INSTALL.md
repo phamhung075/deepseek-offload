@@ -92,7 +92,9 @@ would install the workspace plugin to /…/.dsh/plugins/dsh-workspace-attach as 
 would write /…/.dsh/profiles/web/cordis.patch.yml
 would link /…/<project>/.agents/mcp-deepseek/server.cjs -> package
 would link /…/<project>/.agents/dsh-workspace-attach -> package
+would link /…/<project>/.agents/skills/deepseek-offload/SKILL.md -> package
 would link /…/<project>/.agents/skills/deepseek-offload/scripts/dsh-offload.mjs -> package
+would link /…/<project>/.agents/skills/deepseek-offload/scripts/session-tail.mjs -> package
 would link /…/<project>/.agents/skills/deepseek-offload/references -> package
 would register the deepseek server in /…/<project>/.mcp.json
 would register the deepseek server in /…/<project>/.agents/mcp_config.json
@@ -126,7 +128,7 @@ facts a wrong install gets wrong. Then install:
 | `$DSH_HOME/profiles/acp/cordis.patch.yml` | Pins the delegation model **and** declares the provider's model catalog with that id, each inside managed `# deepseek-offload: … begin/end` fences. The catalog row is not decoration: a patch replaces the catalog, and an id it does not carry resolves as text-only, so image jobs would be refused with `does not declare image input`. |
 | `$DSH_HOME/plugins/dsh-workspace-attach/` | A **copy** of the plugin, so the GUI keeps working if the project moves or is deleted. |
 | `$DSH_HOME/profiles/web/cordis.patch.yml` | One fenced loader row pointing at that copy. |
-| `<project>/.agents/…` | Links to the bridge, the runner, the plugin, and the skill references. **A path the project already has is kept, never overwritten.** |
+| `<project>/.agents/…` | Links to the bridge, the plugin, and the skill — its `SKILL.md`, both runner scripts, and its references. **A path the project already has is kept, never overwritten.** |
 | `<project>/.mcp.json`, `<project>/.agents/mcp_config.json` | With `--with-mcp-config`: a managed `deepseek` entry. An existing `deepseek` entry that differs **is replaced** — if it was hand-written, copy it aside first and tell the human. |
 
 Two facts about those profile files that cause most failures: they must remain a **YAML array**

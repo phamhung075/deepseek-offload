@@ -35,7 +35,7 @@ deepseek-offload install.sh
                            permission policy written into that entry
                            (default: allow — delegated work runs unattended)
   --no-project-links       do not create the project's .agents entries
-                           (bridge, skill scripts, plugin)
+                           (bridge, plugin, skill)
   --link-plugin            symlink the workspace plugin into $DSH_HOME
                            instead of copying it (for plugin development)
   --model NAME             model every delegated session runs on
