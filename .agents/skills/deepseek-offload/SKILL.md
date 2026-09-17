@@ -38,8 +38,8 @@ verifying; the calling model pays only for the prompt and the report.
 
 ## Following a running job
 
-**The web GUI cannot show a job running, and reloading does not change that.** Verified 2026-09-13
-against the Harness source (`packages/api/session-controller/src/list.ts`, `history.ts`):
+**A released web GUI cannot show a job running, and reloading does not change that.** Verified
+2026-09-13 against the Harness source (`packages/api/session-controller/src/list.ts`, `history.ts`):
 
 - The row **is** in the sidebar under the project folder: the session list enumerates the durable
   store, and `dsh-workspace-attach` files the job's session into that Workspace.
@@ -52,15 +52,21 @@ against the Harness source (`packages/api/session-controller/src/list.ts`, `hist
   id instead of reaching the child. Steer a running job with `update`, which uses the worker socket.
 
 Follow a run from the durable log — append-only Zstandard, one frame per append, JSONL inside —
-which `scripts/session-tail.mjs` walks for you:
+which `scripts/session-tail.mjs` walks for you. It reads the newest log generation of that Session
+directory (`session.v3.jsonl.zstd` on a current Harness, `session.jsonl.zstd` on the first one), and
+`--watch` prints the Assistant text the Harness publishes on the live frame channel beside it;
+`--no-text` keeps the activity lines only.
 
 ```sh
 TAIL=.agents/skills/deepseek-offload/scripts/session-tail.mjs
 node "$TAIL" <jobId> --lines 20    # newest tool calls, steps and messages
-node "$TAIL" <jobId> --watch       # poll until the job settles, then print state and report path
+node "$TAIL" <jobId> --watch       # stream Assistant text until the job settles, then print state
 ```
 
-Report those progress lines to the user: the GUI cannot give them.
+Report those progress lines to the user: a released GUI cannot give them. A Harness built from the
+`deepseek-offload` branch (2026-09-16+) drops the last two limitations above — its list reports a
+foreign Session as running from its writes, and its follow stream reads the child's appends and that
+same frame channel — but `session-tail.mjs` still works when no GUI is open at all.
 
 ## 1. When to offload, and when not to
 

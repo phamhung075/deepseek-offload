@@ -11,9 +11,10 @@ and keep working while they run.
 
 **Good to know before you start.** Setup is two commands (see [Quick start](#quick-start)), and the
 safety defaults and review rules are in [Security notes](#security-notes). The job's session is filed
-in the DSH web GUI under the project folder it ran in rather than an "Ungrouped" bucket, but the GUI
-cannot show it running or stream it — follow a live run with
-`.agents/skills/deepseek-offload/scripts/session-tail.mjs <jobId> --watch`.
+in the DSH web GUI under the project folder it ran in rather than an "Ungrouped" bucket, but a
+released GUI cannot show it running or stream it — follow a live run with
+`.agents/skills/deepseek-offload/scripts/session-tail.mjs <jobId> --watch`, which prints the job's
+Assistant text on a Harness that publishes it, and its activity lines otherwise.
 
 ## Key terms
 
