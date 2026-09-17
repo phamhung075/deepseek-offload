@@ -5,6 +5,10 @@ your conversation, only to the workspace on disk.
 
 Every template keeps the **return** small — that is where the caller's token saving comes from.
 
+Dispatch every investigation template below with `--read-only`: the flag pins the job to the
+Harness's `read-only` file policy, so the write prohibition is enforced by the sandbox rather than
+requested in prose. The prompt then describes the investigation, not the prohibition.
+
 Two lines belong in any template that touches a git repository. The first is enforced by the bridge
 regardless (SKILL.md §8), but say it anyway so the child plans around it rather than treating a
 refusal as an obstacle to work around; the second is what keeps a report trustworthy, because a
@@ -20,6 +24,8 @@ describe a test, deployment, or production check you did not perform.
 ---
 
 ## 1. Read-only audit (the default workhorse)
+
+Start it as `node "$OFF" start "<prompt>" --read-only --cwd "$PWD" --label audit-<topic>`.
 
 ```
 Objective: <one imperative sentence, e.g. "List every place the X-Internal-Key is compared">.

@@ -80,7 +80,15 @@ process.stdin.on('data', (chunk) => {
     if (!line.trim()) continue
     const msg = JSON.parse(line)
     if (msg.method === 'session/prompt') {
+      const argv = process.argv.slice(2)
+      const patchIndex = argv.indexOf('--patch')
+      let readOnlyOverlay = null
+      if (patchIndex !== -1) {
+        try { readOnlyOverlay = fs.readFileSync(argv[patchIndex + 1], 'utf8') } catch (error) { readOnlyOverlay = 'UNREADABLE: ' + error.message }
+      }
       fs.writeFileSync(process.env.STUB_REPORT, JSON.stringify({
+        argv,
+        readOnlyOverlay,
         gitConfigGlobal: process.env.GIT_CONFIG_GLOBAL || null,
         toplevel: run(['rev-parse', '--show-toplevel']),
         commit: run(['commit', '--allow-empty', '-m', 'guard probe']),
@@ -107,11 +115,12 @@ process.stdin.on('data', (chunk) => {
  * @param fixture - the fixture from {@link fixture}.
  * @returns the MCP tool result text.
  */
-function callAgent(fixture) {
+function callAgent(fixture, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const bridge = spawn(process.execPath, [BRIDGE], {
       env: {
         ...process.env,
+        ...extraEnv,
         HOME: fixture.home,
         GIT_CONFIG_NOSYSTEM: '1',
         DSH_HOME: path.join(fixture.root, 'dsh-home'),
@@ -173,53 +182,44 @@ test('the bridge spawns a job under a guard that refuses commits and pushes', as
   assert.equal(mustGit(fx.root, ['--git-dir', fx.origin, 'rev-list', '--count', 'main']), before)
 
   assert.match(text, /^GitWrites: guarded — commits refused, pushes to a remote named origin redirected to .*origin\.git;/m)
+  assert.match(text, /^FilePolicy: deployment default \(workspace-write on a base-backed profile\)/m)
   assert.match(text, /probe complete/)
 })
 
 test('DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 lifts the guard for a job that must write', async () => {
   const fx = fixture('optout')
-  const text = await new Promise((resolve, reject) => {
-    const bridge = spawn(process.execPath, [BRIDGE], {
-      env: {
-        ...process.env,
-        HOME: fx.home,
-        GIT_CONFIG_NOSYSTEM: '1',
-        DSH_HOME: path.join(fx.root, 'dsh-home'),
-        DSH_BIN: fx.stub,
-        DEEPSEEK_OFFLOAD_GUARD_DIR: path.join(fx.root, 'guards'),
-        DEEPSEEK_MCP_DEFAULT_CWD: fx.repo,
-        DEEPSEEK_WORKSPACE_ATTACH: '0',
-        DEEPSEEK_MCP_ALLOW_GIT_WRITE: '1',
-        STUB_CWD: fx.repo,
-        STUB_REPORT: fx.report,
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-    let buffer = ''
-    const timer = setTimeout(() => { bridge.kill('SIGKILL'); reject(new Error('bridge did not answer in time')) }, 30_000)
-    bridge.stdout.setEncoding('utf8')
-    bridge.stdout.on('data', (chunk) => {
-      buffer += chunk
-      let index
-      while ((index = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, index)
-        buffer = buffer.slice(index + 1)
-        if (!line.trim()) continue
-        const msg = JSON.parse(line)
-        if (msg.id === 2 && msg.result) {
-          clearTimeout(timer)
-          bridge.kill('SIGTERM')
-          resolve(msg.result.content[0].text)
-        }
-      }
-    })
-    bridge.on('error', reject)
-    bridge.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } } })}\n`)
-    bridge.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'deepseek_agent', arguments: { prompt: 'run the guard probe' } } })}\n`)
-  })
-
+  const text = await callAgent(fx, { DEEPSEEK_MCP_ALLOW_GIT_WRITE: '1' })
   const probe = JSON.parse(fs.readFileSync(fx.report, 'utf8'))
   assert.equal(probe.gitConfigGlobal, null, 'no guard config is exported when the caller opts out')
   assert.equal(probe.commit.status, 0)
   assert.match(text, /^GitWrites: ALLOWED — DEEPSEEK_MCP_ALLOW_GIT_WRITE=1/m)
+})
+
+test('DEEPSEEK_MCP_READ_ONLY=1 pins the job through a --patch overlay', async () => {
+  const fx = fixture('readonly')
+  const text = await callAgent(fx, { DEEPSEEK_MCP_READ_ONLY: '1' })
+
+  const probe = JSON.parse(fs.readFileSync(fx.report, 'utf8'))
+  const patchIndex = probe.argv.indexOf('--patch')
+  assert.notEqual(patchIndex, -1, 'the child is launched with a --patch overlay')
+  const overlay = probe.argv[patchIndex + 1]
+  assert.equal(overlay, path.join(fx.root, 'dsh-home', 'offload-read-only.cordis.yml'))
+  assert.match(probe.readOnlyOverlay, /- id: sandbox-policy/)
+  assert.match(probe.readOnlyOverlay, /mode: read-only/)
+  assert.match(probe.readOnlyOverlay, /workspaceRoot: !!js process\.cwd\(\)/)
+
+  assert.match(text, /^FilePolicy: read-only — the sandbox denies every file mutation \(overlay .*offload-read-only\.cordis\.yml\)$/m)
+})
+
+test('two bridges install independent guards without colliding', async () => {
+  const first = fixture('two-a')
+  const second = fixture('two-b')
+  const [textA, textB] = await Promise.all([callAgent(first), callAgent(second)])
+
+  assert.match(textA, /^GitWrites: guarded/m)
+  assert.match(textB, /^GitWrites: guarded/m)
+  assert.notEqual(
+    JSON.parse(fs.readFileSync(first.report, 'utf8')).gitConfigGlobal,
+    JSON.parse(fs.readFileSync(second.report, 'utf8')).gitConfigGlobal,
+  )
 })

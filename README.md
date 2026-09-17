@@ -164,6 +164,12 @@ predates the plugin.
   auto-accepts every permission prompt, so the child can run shell commands and edit files without
   asking. Set `DEEPSEEK_MCP_PERMISSION=reject` — or pass `--permission reject` — for read-only work,
   and only delegate into workspaces you would trust a script in.
+- **Investigation jobs are read-only by construction.** Start them with `--read-only` (or
+  `DEEPSEEK_MCP_READ_ONLY=1` on the MCP server) and the bridge spawns the job with a `--patch`
+  overlay that pins the Harness file policy to `read-only`: `fs-sandbox` denies every mutation and the
+  OS sandbox confines shell writes, so "do not edit files" stops being a request the model can
+  ignore. The result reports it on a `FilePolicy:` line. Without the flag a job runs
+  `workspace-write` and may edit anything inside the workspace.
 - **Git history writes are refused, not merely discouraged.** The bridge installs a guard before it
   spawns a job: hooks refuse `git commit`, `git commit --amend`, merge commits, and `git push`, and a
   push to a remote named `origin` is redirected to a per-job bare repository, so even `--no-verify`
@@ -197,6 +203,7 @@ Bridge and runner environment (all optional):
 | `DEEPSEEK_MCP_SKIP` | Server names never forwarded. |
 | `DEEPSEEK_MCP_TIMEOUT_MS` | Per-turn timeout. Default 15 min. |
 | `DEEPSEEK_MCP_ALLOW_GIT_WRITE` | `1` lets a delegated job commit and push. Default: the git write guard refuses both. |
+| `DEEPSEEK_MCP_READ_ONLY` | `1` pins every delegated job to the `read-only` file policy, so it cannot modify a file. Default: unset (`workspace-write`). |
 | `DEEPSEEK_OFFLOAD_GUARD_DIR` | Where git write guards live. Default `$DSH_HOME/offload-guards`. |
 | `DEEPSEEK_OFFLOAD_MODEL` | Model pinned into the `acp` profile by `install.sh` (`--model` overrides). Default `deepseek-flash`. |
 | `DEEPSEEK_WORKSPACE_ATTACH` | `0` stops asking the GUI to file jobs under their project. |

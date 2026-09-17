@@ -11,7 +11,8 @@ description: >-
   pricing, and `start --defer-to-off-peak` to schedule batch work for half price),
   how to follow a running job (the web GUI lists its session but cannot show it
   live), prompt contracts for self-contained jobs, the git write guard that refuses
-  commits and pushes by default, and the security and token rules.
+  commits and pushes by default, the `--read-only` file policy for investigation jobs,
+  and the security and token rules.
 ---
 
 # DeepSeek Background Offload — delegating work from other LLMs
@@ -184,6 +185,7 @@ OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
 node "$OFF" doctor                       # verify bridge, DSH_HOME, model, MCP config, job store
 node "$OFF" window                       # is DeepSeek pricing peak or off-peak right now?
 node "$OFF" start "<self-contained task>" --cwd "$PWD" --label audit-licensing
+node "$OFF" start "<investigation, nothing may change>" --read-only --label root-cause
 node "$OFF" start "<batch job>" --cwd "$PWD" --defer-to-off-peak --detach  # wait for half price
 node "$OFF" status  <jobId>
 node "$OFF" result  <jobId>
@@ -200,7 +202,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | :--- | :--- | :--- |
 | `doctor` | Checks node, bridge, `DSH_HOME`, model patch, MCP config, job-store writability. | `0` ok, `1` fail |
 | `window` | Reports whether DeepSeek pricing is peak or off-peak right now, and when it next flips — see "Off-peak planning" below. | `0` |
-| `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. `--detach` returns instantly. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
+| `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. `--detach` returns instantly. `--read-only` pins the job to the Harness's read-only file policy, so it cannot modify a file; `--allow-git-write` lifts the git write guard instead, and the two are mutually exclusive. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
 | `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
 | `result` | Final report text. | `0` done, `1` error, `2` still running |
 | `guard` | The job's git write guard state, plus any refs a guarded push landed in the sandbox instead of the real remote. | `0` |
@@ -212,8 +214,8 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
 
 Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-config FILE`,
-`--label NAME`, `--permission allow|reject`, `--allow-git-write`, `--timeout-ms N`, `--detach`,
-`--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
+`--label NAME`, `--permission allow|reject`, `--allow-git-write`, `--read-only`, `--timeout-ms N`,
+`--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
 shows for it: an idle row under the project folder, never live progress. Report progress yourself
@@ -294,6 +296,8 @@ Every job prompt must contain:
 6. **Evidence rule** — "cite files/commands you actually ran; mark anything unverified".
 7. **Git policy** — "report the change; do not commit, push, tag, or rewrite history". This one is
    enforced, not merely asked: see the guard in §8.
+8. **For an investigation, no write policy at all** — dispatch it with `--read-only` and let the
+   file policy say it, rather than writing "do not edit files" and hoping. See §8.
 
 Keep the return small — ask for findings, not a transcript. The bridge opens a **new session per
 call**: a follow-up is a new job that receives the previous report; a human can continue the
@@ -303,6 +307,14 @@ original session in the GUI.
 
 ## 8. Mandatory rules and safety
 
+- **An investigation job cannot write at all — pass `--read-only`, do not ask.** The flag pins the
+  job to the Harness's `read-only` file policy through a `--patch` overlay applied after the profile
+  layer, so `fs-sandbox` denies every mutation and the OS sandbox confines shell writes; the result
+  carries a `FilePolicy:` line naming the overlay. Without it a job runs `workspace-write`, which
+  freely edits anything inside the workspace — a delegated "read-only" investigation has already
+  implemented five unrequested fixes under one (2026-09-17, `public/`, later committed as `8a99260`).
+  Keep the flag for anything whose deliverable is a diagnosis; it is mutually exclusive with
+  `--allow-git-write`, because a commit needs writes.
 - **A delegated job cannot commit or push by default — that is a barrier, not a request.** The
   bridge installs a git write guard before it spawns the job: `core.hooksPath` points at hooks that
   refuse `git commit`, `git commit --amend`, merge commits, and `git push`, and `remote.origin.pushurl`
@@ -351,6 +363,8 @@ original session in the GUI.
 | Job `state: error`, worker gone | Worker died (crash/reboot) — read `scratch/dsh-offload/jobs/<jobId>.worker.log`. |
 | `wait` times out, job still running | Not stuck — raise `--timeout-ms`; check `status`, or follow the session log with `scripts/session-tail.mjs <jobId> --watch`. |
 | Result ends mid-sentence | ACP prompt timeout (`DEEPSEEK_MCP_TIMEOUT_MS`) — split the job or raise it. |
+| Job's `FilePolicy:` line says `read-only` and the child reports denied writes | The `--read-only` flag working as intended: the sandbox refused the mutation. Drop the flag only if the job genuinely must change files. |
+| `FilePolicy: read-only REQUESTED but its overlay could not be written` | The bridge could not write `$DSH_HOME/offload-read-only.cordis.yml` — treat the job as write-capable and fix the DSH_HOME permissions. |
 | Child reports `git commit refused` / `git push refused` | The guard working as intended. The child must report the change instead; the caller applies it. Pass `--allow-git-write` only when the task genuinely needs to write history. |
 | Job report says `GitWrites: UNGUARDED` | The guard could not install (usually `git` missing from the bridge's `PATH`), so nothing was contained — treat the job's git writes as the child's word and check the repository before trusting it. |
 | `does not declare image input` on an image job | The pinned id is absent from the `acp` profile's model catalog, which a patch replaces: re-run `install.sh`, then `doctor` (`model accepts images`). |

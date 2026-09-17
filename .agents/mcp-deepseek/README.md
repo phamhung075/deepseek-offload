@@ -113,6 +113,17 @@ A server that fails to start aborts `session/new` — DSH reports this as a gene
 | `DEEPSEEK_MCP_SKIP` | `deepseek` | Comma-separated server names never forwarded |
 | `DEEPSEEK_MCP_ALLOW_GIT_WRITE` | *(unset)* | `1` lets a delegated session commit and push. Default: the git write guard refuses both |
 | `DEEPSEEK_OFFLOAD_GUARD_DIR` | `$DSH_HOME/offload-guards` | Where the per-bridge git write guard lives |
+| `DEEPSEEK_MCP_READ_ONLY` | *(unset)* | `1` pins delegated jobs to the `read-only` file policy, so they cannot modify a file |
+
+## Read-only delegation
+
+`DEEPSEEK_MCP_READ_ONLY=1` spawns the ACP child with `--patch $DSH_HOME/offload-read-only.cordis.yml`,
+an overlay written by the bridge that pins the `sandbox-policy` row to `read-only`. A `--patch`
+overlay is applied after the profile layer, so it outranks a mode the profile or home patch set, and
+the row's whole `config` is restated because a patch replaces that value instead of merging keys.
+`fs-sandbox` then denies every file mutation and the OS sandbox confines shell writes, so a job
+briefed as an investigation cannot leave changes behind however it is prompted. Each result carries a
+`FilePolicy:` line naming the overlay, or naming the inherited mode when the flag is absent.
 
 ## Git write guard
 

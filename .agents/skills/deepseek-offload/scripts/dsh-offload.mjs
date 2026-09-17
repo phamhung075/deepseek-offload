@@ -481,6 +481,9 @@ const WORKSPACE_PATTERN = /^Workspace:\s*(.+)$/m
 // The bridge reports the git write guard on its own header line too: whether the
 // job could commit or push is a fact about containment, not about the answer.
 const GIT_WRITES_PATTERN = /^GitWrites:\s*(.+)$/m
+// And the file policy it ran under, so "was this job allowed to write?" is
+// answered by the result rather than inferred from the prompt.
+const FILE_POLICY_PATTERN = /^FilePolicy:\s*(.+)$/m
 // The sandbox a guarded push lands in, when the bridge reported one.
 const GIT_SANDBOX_PATTERN = /redirected to (\S+?);/
 
@@ -490,12 +493,14 @@ function parseAgentResult(text) {
   const body = separator === -1 ? '' : text.slice(separator + 2)
   const workspace = WORKSPACE_PATTERN.exec(text)
   const gitWrites = GIT_WRITES_PATTERN.exec(text)
+  const filePolicy = FILE_POLICY_PATTERN.exec(text)
   const match = SUMMARY_PATTERN.exec(header)
   if (match === null) {
     return {
       sessionId: null, stopReason: null, elapsedMs: null, body: text,
       workspace: workspace === null ? null : workspace[1].trim(),
       gitWrites: gitWrites === null ? null : gitWrites[1].trim(),
+      filePolicy: filePolicy === null ? null : filePolicy[1].trim(),
     }
   }
   return {
@@ -505,6 +510,7 @@ function parseAgentResult(text) {
     body,
     workspace: workspace === null ? null : workspace[1].trim(),
     gitWrites: gitWrites === null ? null : gitWrites[1].trim(),
+    filePolicy: filePolicy === null ? null : filePolicy[1].trim(),
   }
 }
 
@@ -833,7 +839,10 @@ async function runWorker(jobId) {
       // The CLI flag is the authority, so the variable is set either way: a
       // caller with DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 exported cannot silently
       // unguard a job started without `--allow-git-write`.
-      env: { DEEPSEEK_MCP_ALLOW_GIT_WRITE: job.allowGitWrite === true ? '1' : '0' },
+      env: {
+        DEEPSEEK_MCP_ALLOW_GIT_WRITE: job.allowGitWrite === true ? '1' : '0',
+        DEEPSEEK_MCP_READ_ONLY: job.readOnly === true ? '1' : '0',
+      },
       onProgress: (params) => {
         try {
           updateJob(jobId, { progressChars: params.progress ?? 0, lastProgressAt: Date.now() })
@@ -899,6 +908,7 @@ async function runWorker(jobId) {
         sessionId,
         workspace: failure.workspace,
         gitWrites: failure.gitWrites,
+        filePolicy: failure.filePolicy,
         finishedAt,
         elapsedMs: finishedAt - startedAt,
       })
@@ -916,6 +926,7 @@ async function runWorker(jobId) {
       resultChars: parsed.body.length,
       workspace: parsed.workspace,
       gitWrites: parsed.gitWrites,
+      filePolicy: parsed.filePolicy,
       finishedAt,
       elapsedMs: finishedAt - startedAt,
       resultFile: path.relative(PROJECT_ROOT, resultFile(jobId)),
@@ -966,6 +977,8 @@ function describeJob(job, { full = false } = {}) {
   if (job.workspace) lines.push(`workspace ${job.workspace}`)
   if (typeof job.gitWrites === 'string') lines.push(`git       ${job.gitWrites}`)
   else if (job.allowGitWrite === true) lines.push('git       writes allowed (--allow-git-write)')
+  if (typeof job.filePolicy === 'string') lines.push(`files     ${job.filePolicy}`)
+  else if (job.readOnly === true) lines.push('files     read-only requested (--read-only)')
   if (job.mcpConfig) lines.push(`mcp       ${job.mcpConfig}`)
   else lines.push('mcp       (none)')
   if (job.error) lines.push(`error     ${job.error.split('\n')[0]}`)
@@ -981,6 +994,9 @@ async function commandStart(positional, flags) {
   const prompt = positional.join(' ').trim()
   const cwd = typeof flags.cwd === 'string' ? flags.cwd : DEFAULT_CWD
   if (prompt === '') fail('start requires a prompt: dsh-offload start "<self-contained task>"')
+  if (flags['read-only'] === true && flags['allow-git-write'] === true) {
+    fail('--read-only and --allow-git-write contradict each other: read-only denies the file writes a commit needs')
+  }
   if (!isAbsolutePath(cwd)) fail(`--cwd must be absolute: ${cwd}`)
   if (!fs.existsSync(cwd)) fail(`--cwd does not exist: ${cwd}`)
   if (!fs.existsSync(BRIDGE_SERVER)) fail(`bridge server not found: ${BRIDGE_SERVER}`)
@@ -1008,6 +1024,9 @@ async function commandStart(positional, flags) {
     // Git writes are refused unless the caller asks for them: the guard lives in
     // the job's git environment, not in its prompt.
     allowGitWrite: flags['allow-git-write'] === true,
+    // Read-only is the whole point of an investigation job, so it is a flag the
+    // runner enforces through the job's file policy, not a sentence in a prompt.
+    readOnly: flags['read-only'] === true,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : DEFAULT_TIMEOUT_MS,
     sessionId: null,
     startedAt: now,
@@ -1600,6 +1619,21 @@ async function commandDoctor(_positional, flags) {
     }
   })(), JOBS_DIR)
 
+  // Read-only delegation rides a late `--patch` overlay that targets the
+  // sandbox-policy row, so the profile must actually compose the bundle that
+  // declares it; a profile without the base bundle would ignore the overlay.
+  const acpManifest = path.join(dshHome, 'profiles', 'acp', 'package.json')
+  let acpBundles = []
+  try {
+    acpBundles = JSON.parse(fs.readFileSync(acpManifest, 'utf8'))?.dsh?.profile?.bundles ?? []
+  } catch {
+    /* a missing or unreadable manifest is reported by the check itself */
+  }
+  const hasBase = acpBundles.includes('@deepseek-ai/dsh-base')
+  push('read-only delegation', hasBase, hasBase
+    ? 'acp composes @deepseek-ai/dsh-base — --read-only pins sandbox-policy to read-only through a --patch overlay'
+    : `acp bundles (${acpBundles.join(', ') || 'none'}) omit @deepseek-ai/dsh-base — verify the overlay still targets a sandbox-policy row before trusting --read-only`)
+
   const mcpConfig = process.env.DEEPSEEK_MCP_CONFIG || ''
   if (mcpConfig === '') {
     push('MCP config', true, 'DEEPSEEK_MCP_CONFIG unset — delegated jobs get no MCP tools')
@@ -1689,6 +1723,9 @@ function usage() {
                                  --allow-git-write  lift the git write guard, so the job
                                    may commit and push (default: both are refused
                                    and pushes to origin land in a sandbox)
+                                 --read-only  pin the job to the read-only file policy,
+                                   so it cannot modify a file at all (default:
+                                   workspace-write, mutations inside the workspace)
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
@@ -1712,6 +1749,8 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              DEEPSEEK_MCP_TIMEOUT_MS, DEEPSEEK_MCP_CONFIG, DEEPSEEK_MCP_SKIP,
              DEEPSEEK_MCP_ALLOW_GIT_WRITE (=1 lifts the git write guard for a job
              whose task genuinely must commit or push; --allow-git-write sets it),
+             DEEPSEEK_MCP_READ_ONLY (=1 pins a job to the read-only file policy;
+             --read-only sets it),
              DEEPSEEK_WORKSPACE_ATTACH (=0 to stop asking the GUI to group jobs),
              DEEPSEEK_WORKSPACE_ATTACH_DIR, DEEPSEEK_WORKSPACE_ATTACH_WAIT_MS,
              DSH_OFFLOAD_JOB_DIR, DSH_GUI_URL

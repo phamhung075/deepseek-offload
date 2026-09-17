@@ -15,6 +15,9 @@
  * - Spawns the job under a git write guard (`./git-guard.cjs`) by default, so a
  *   delegated agent cannot commit to the caller's branch or push; the result
  *   reports the guard, and `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1` opts out.
+ * - `DEEPSEEK_MCP_READ_ONLY=1` pins the job to the read-only file policy through
+ *   a `--patch` overlay, so investigation work cannot modify files at all
+ *   instead of being asked not to.
  *
  * Logs go to stderr only; stdout carries MCP protocol traffic only.
  */
@@ -412,6 +415,69 @@ function startWorkspaceAttach(sessionId, cwd) {
 }
 
 // ---------------------------------------------------------------------------
+// File policy (read-only delegation)
+// ---------------------------------------------------------------------------
+/**
+ * Whether this bridge pins every job it spawns to the read-only file policy.
+ * @returns true only for the exact opt-in value.
+ */
+function readOnlyRequested() {
+  return process.env.DEEPSEEK_MCP_READ_ONLY === '1'
+}
+
+/**
+ * The generated overlay that pins the sandbox policy for read-only jobs.
+ * @returns an absolute path under `DSH_HOME`.
+ */
+function readOnlyPatchPath() {
+  return path.join(DSH_HOME, 'offload-read-only.cordis.yml')
+}
+
+/**
+ * Write the read-only overlay and return its path. A `--patch` overlay is applied
+ * after the profile layer, so it outranks a `sandbox-policy` row the profile or
+ * home patch pinned; the row's whole `config` is restated because a patch
+ * replaces that value instead of merging its keys.
+ * @returns the overlay path, or null when it could not be written.
+ */
+function ensureReadOnlyPatch() {
+  const file = readOnlyPatchPath()
+  const source = '# Written by deepseek-mcp for DEEPSEEK_MCP_READ_ONLY=1.\n'
+    + '# A --patch overlay is applied after the profile layer, so this pins the\n'
+    + '# sandbox policy for a delegated investigation job whatever the profile says.\n'
+    + '- id: sandbox-policy\n'
+    + '  config:\n'
+    + '    mode: read-only\n'
+    + '    workspaceRoot: !!js process.cwd()\n'
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, source)
+    return file
+  } catch (error) {
+    log(`read-only overlay could not be written: ${error.message}`)
+    return null
+  }
+}
+
+/**
+ * The result line describing the file policy this job runs under, so a caller
+ * never has to assume whether writes were possible.
+ * @returns one line, always present.
+ */
+function describeFilePolicy() {
+  if (!readOnlyRequested()) {
+    const inherited = process.env.DSH_PERMISSION_MODE
+    return inherited === undefined || inherited === ''
+      ? 'FilePolicy: deployment default (workspace-write on a base-backed profile) — file mutations are confined to the session workspace'
+      : `FilePolicy: ${inherited} (inherited DSH_PERMISSION_MODE)`
+  }
+  const patch = ensureReadOnlyPatch()
+  return patch === null
+    ? 'FilePolicy: read-only REQUESTED but its overlay could not be written — assume this job can write files'
+    : `FilePolicy: read-only — the sandbox denies every file mutation (overlay ${patch})`
+}
+
+// ---------------------------------------------------------------------------
 // Git write guard
 // ---------------------------------------------------------------------------
 // One guard per bridge process: every ACP child spawned here carries the same
@@ -473,7 +539,11 @@ class AcpClient {
     this.onText = null // optional callback(text-so-far) for progress
 
     const launch = resolveDshLaunch()
-    this.child = spawn(launch.command, launch.args, {
+    // Read-only is applied as a late `--patch` overlay rather than an
+    // environment default, so a profile that pins sandbox-policy cannot win.
+    const readOnlyPatch = readOnlyRequested() ? ensureReadOnlyPatch() : null
+    const args = readOnlyPatch === null ? launch.args : [...launch.args, '--patch', readOnlyPatch]
+    this.child = spawn(launch.command, args, {
       cwd: launch.cwd,
       // `options.env` carries the git write guard; it merges last so a job can
       // never inherit a caller's GIT_CONFIG_GLOBAL in place of the guard.
@@ -627,6 +697,7 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
   // Resolved before the child spawns: installing the guard here is what puts it
   // in the job's environment, so it must not move inside the callback.
   const gitWrites = describeGitWrites()
+  const filePolicy = describeFilePolicy()
   return withAcp(PERMISSION, async (client) => {
     client.onText = (text) => { if (onProgress) onProgress(text) }
 
@@ -666,7 +737,7 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
           // goes looking for its session in the GUI.
           const text = client.collectedText
           const prefix = text ? `DeepSeek returned partial output before failing:\n\n${text}\n\n---\n` : ''
-          throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}\n${await workspaceAttach}\n${gitWrites}`)
+          throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}\n${await workspaceAttach}\n${gitWrites}\n${filePolicy}`)
         }
         stopReason = result && result.stopReason ? result.stopReason : 'end_turn'
         // A queued update — from a natural stop, or from session/cancel interrupting this
@@ -694,6 +765,7 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
       mcp: describeMcpServers(resolvedMcp),
       workspace: await workspaceAttach,
       gitWrites,
+      filePolicy,
     }
   }, { env: guardEnvironment(ensureGitGuard()) })
 }
@@ -722,7 +794,9 @@ const TOOLS = [
       'in a sandbox instead of the real remote, so ask for the changes it made and apply them yourself; ' +
       'DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 lifts the guard for a task that genuinely must commit or push. ' +
       'The result reports the guard state on a GitWrites line. Tell the job to report only what it ran and ' +
-      'observed, never to describe testing it did not do.',
+      'observed, never to describe testing it did not do. ' +
+      'When this server was started with DEEPSEEK_MCP_READ_ONLY=1 the job also runs under the read-only file ' +
+      'policy, so it cannot modify a file at all; the result reports that on a FilePolicy line.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -849,6 +923,7 @@ async function handleToolsCall(id, params) {
         out.mcp,
         out.workspace,
         out.gitWrites,
+        out.filePolicy,
         '',
         out.text || '(no text output)',
       ].join('\n')
