@@ -36,7 +36,7 @@
  * sessions created before the plugin was installed.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
@@ -283,7 +283,7 @@ function parseArgs(argv) {
 // MCP client over the existing bridge
 // ---------------------------------------------------------------------------
 class Bridge {
-  constructor({ permission = DEFAULT_PERMISSION, timeoutMs = DEFAULT_TIMEOUT_MS, onProgress = null } = {}) {
+  constructor({ permission = DEFAULT_PERMISSION, timeoutMs = DEFAULT_TIMEOUT_MS, onProgress = null, env = null } = {}) {
     this.pending = new Map()
     this.nextId = 1
     this.buffer = ''
@@ -297,6 +297,7 @@ class Bridge {
         ...process.env,
         DEEPSEEK_MCP_PERMISSION: permission,
         DEEPSEEK_MCP_TIMEOUT_MS: String(timeoutMs),
+        ...env,
       },
       stdio: ['pipe', 'pipe', 'inherit'],
     })
@@ -477,17 +478,24 @@ const SUMMARY_PATTERN = /stopReason=([^,]+),\s*(\d+)ms,\s*session=([^\s)]+)/
 // The bridge reports workspace grouping on its own header line: a fact about the
 // GUI's sidebar rather than about the answer, so it never reaches the body.
 const WORKSPACE_PATTERN = /^Workspace:\s*(.+)$/m
+// The bridge reports the git write guard on its own header line too: whether the
+// job could commit or push is a fact about containment, not about the answer.
+const GIT_WRITES_PATTERN = /^GitWrites:\s*(.+)$/m
+// The sandbox a guarded push lands in, when the bridge reported one.
+const GIT_SANDBOX_PATTERN = /redirected to (\S+?);/
 
 function parseAgentResult(text) {
   const separator = text.indexOf('\n\n')
   const header = separator === -1 ? text : text.slice(0, separator)
   const body = separator === -1 ? '' : text.slice(separator + 2)
   const workspace = WORKSPACE_PATTERN.exec(text)
+  const gitWrites = GIT_WRITES_PATTERN.exec(text)
   const match = SUMMARY_PATTERN.exec(header)
   if (match === null) {
     return {
       sessionId: null, stopReason: null, elapsedMs: null, body: text,
       workspace: workspace === null ? null : workspace[1].trim(),
+      gitWrites: gitWrites === null ? null : gitWrites[1].trim(),
     }
   }
   return {
@@ -496,7 +504,19 @@ function parseAgentResult(text) {
     elapsedMs: Number(match[2]),
     body,
     workspace: workspace === null ? null : workspace[1].trim(),
+    gitWrites: gitWrites === null ? null : gitWrites[1].trim(),
   }
+}
+
+/**
+ * The sandbox repository a guarded job's pushes were redirected to.
+ * @param job - a job record carrying the bridge's `gitWrites` line.
+ * @returns the absolute path, or null when the job was unguarded.
+ */
+function gitSandbox(job) {
+  if (typeof job.gitWrites !== 'string') return null
+  const match = GIT_SANDBOX_PATTERN.exec(job.gitWrites)
+  return match === null ? null : match[1]
 }
 
 /**
@@ -810,6 +830,10 @@ async function runWorker(jobId) {
     bridge = new Bridge({
       permission: job.permission,
       timeoutMs: job.timeoutMs,
+      // The CLI flag is the authority, so the variable is set either way: a
+      // caller with DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 exported cannot silently
+      // unguard a job started without `--allow-git-write`.
+      env: { DEEPSEEK_MCP_ALLOW_GIT_WRITE: job.allowGitWrite === true ? '1' : '0' },
       onProgress: (params) => {
         try {
           updateJob(jobId, { progressChars: params.progress ?? 0, lastProgressAt: Date.now() })
@@ -867,12 +891,14 @@ async function runWorker(jobId) {
     const finishedAt = Date.now()
     if (outcome.error) {
       const message = outcome.error.message || String(outcome.error)
-      const sessionId = discovered ?? parseAgentResult(message).sessionId
+      const failure = parseAgentResult(message)
+      const sessionId = discovered ?? failure.sessionId
       updateJob(jobId, {
         state: 'error',
         error: message,
         sessionId,
-        workspace: parseAgentResult(message).workspace,
+        workspace: failure.workspace,
+        gitWrites: failure.gitWrites,
         finishedAt,
         elapsedMs: finishedAt - startedAt,
       })
@@ -889,6 +915,7 @@ async function runWorker(jobId) {
       bridgeElapsedMs: parsed.elapsedMs,
       resultChars: parsed.body.length,
       workspace: parsed.workspace,
+      gitWrites: parsed.gitWrites,
       finishedAt,
       elapsedMs: finishedAt - startedAt,
       resultFile: path.relative(PROJECT_ROOT, resultFile(jobId)),
@@ -937,6 +964,8 @@ function describeJob(job, { full = false } = {}) {
   }
   if (job.stopReason) lines.push(`stop      ${job.stopReason}`)
   if (job.workspace) lines.push(`workspace ${job.workspace}`)
+  if (typeof job.gitWrites === 'string') lines.push(`git       ${job.gitWrites}`)
+  else if (job.allowGitWrite === true) lines.push('git       writes allowed (--allow-git-write)')
   if (job.mcpConfig) lines.push(`mcp       ${job.mcpConfig}`)
   else lines.push('mcp       (none)')
   if (job.error) lines.push(`error     ${job.error.split('\n')[0]}`)
@@ -976,6 +1005,9 @@ async function commandStart(positional, flags) {
     cwd,
     mcpConfig,
     permission: typeof flags.permission === 'string' ? flags.permission : DEFAULT_PERMISSION,
+    // Git writes are refused unless the caller asks for them: the guard lives in
+    // the job's git environment, not in its prompt.
+    allowGitWrite: flags['allow-git-write'] === true,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : DEFAULT_TIMEOUT_MS,
     sessionId: null,
     startedAt: now,
@@ -1079,6 +1111,52 @@ function commandResult(positional, flags) {
   }
   process.stdout.write(`${describeJob(job)}\n\n--- result ---\n${text === '' ? '(no output captured)\n' : text}`)
   return job.state === 'error' ? 1 : 0
+}
+
+/**
+ * Report what the git write guard did with one job's git writes: whether it was
+ * guarded, and the refs a guarded push landed in the sandbox instead of the
+ * real remote.
+ * @param positional - `[jobId]`.
+ * @param flags - `--json` prints the same facts as an object.
+ * @returns process exit code: always 0, since "no sandbox" is a state, not a failure.
+ */
+function commandGuard(positional, flags) {
+  ensureDirs()
+  const jobId = positional[0]
+  if (jobId === undefined) fail('guard requires a job id: dsh-offload guard <jobId>')
+  const job = reconcileJob(readJob(jobId))
+  const sandbox = gitSandbox(job)
+  const refs = sandbox === null ? [] : readSandboxRefs(sandbox)
+  if (flags.json === true) {
+    print({ jobId, state: job.state, allowGitWrite: job.allowGitWrite === true, gitWrites: job.gitWrites ?? null, sandbox, refs }, true)
+    return 0
+  }
+  process.stdout.write(`job       ${jobId}\n`)
+  process.stdout.write(`git       ${job.gitWrites
+    ?? (job.allowGitWrite === true ? 'writes allowed (--allow-git-write)' : 'not reported yet (the job has not reached the bridge)')}\n`)
+  if (sandbox === null) {
+    process.stdout.write('\nNo sandbox to inspect: this job was not guarded, or it has not reported yet.\n')
+    return 0
+  }
+  process.stdout.write(`sandbox   ${sandbox}\n`)
+  process.stdout.write(refs.length === 0
+    ? '\nEmpty sandbox: the job never pushed, or its push was refused by the pre-push hook.\n'
+    : `\n${refs.length} ref(s) the job pushed into the sandbox:\n${refs.map((ref) => `  ${ref}\n`).join('')}`)
+  process.stdout.write(`\ninspect   git --git-dir=${sandbox} log --oneline --all\n`)
+  process.stdout.write(`          git --git-dir=${sandbox} show <sha>\n`)
+  return 0
+}
+
+/**
+ * Refs a sandbox bare repository received, newest-agnostic `<sha> <refname>` lines.
+ * @param sandbox - absolute path of the guard's bare repository.
+ * @returns one trimmed line per ref, empty when the sandbox is unreadable.
+ */
+function readSandboxRefs(sandbox) {
+  const out = spawnSync('git', ['--git-dir', sandbox, 'for-each-ref', '--format=%(objectname:short) %(refname)'], { encoding: 'utf8' })
+  if (out.error !== undefined || out.status !== 0) return []
+  return out.stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '')
 }
 
 /**
@@ -1608,11 +1686,16 @@ function usage() {
                                  --cwd DIR (absolute, default ${DEFAULT_CWD})
                                  --mcp-config FILE (Claude .mcp.json / Gemini mcp_config.json)
                                  --label NAME  --permission allow|reject
+                                 --allow-git-write  lift the git write guard, so the job
+                                   may commit and push (default: both are refused
+                                   and pushes to origin land in a sandbox)
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
   result <jobId> [--json]      final report text
+  guard  <jobId> [--json]      git write guard state, and any refs the job pushed
+                               into its sandbox instead of the real remote
   wait   <jobId> [--timeout-ms N]   block until the job settles, then print the result
   update <jobId> "<new info>"    steer a running job onto the right track
   cancel <jobId>                stop a running job outright, no redirect
@@ -1627,6 +1710,8 @@ function usage() {
 
 Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              DEEPSEEK_MCP_TIMEOUT_MS, DEEPSEEK_MCP_CONFIG, DEEPSEEK_MCP_SKIP,
+             DEEPSEEK_MCP_ALLOW_GIT_WRITE (=1 lifts the git write guard for a job
+             whose task genuinely must commit or push; --allow-git-write sets it),
              DEEPSEEK_WORKSPACE_ATTACH (=0 to stop asking the GUI to group jobs),
              DEEPSEEK_WORKSPACE_ATTACH_DIR, DEEPSEEK_WORKSPACE_ATTACH_WAIT_MS,
              DSH_OFFLOAD_JOB_DIR, DSH_GUI_URL
@@ -1666,6 +1751,9 @@ async function main() {
       return
     case 'result':
       process.exitCode = commandResult(positional, flags)
+      return
+    case 'guard':
+      process.exitCode = commandGuard(positional, flags)
       return
     case 'update':
       process.exitCode = await commandUpdate(positional, flags)

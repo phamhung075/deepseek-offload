@@ -12,6 +12,9 @@
  * - Uses the SAME DSH_HOME as the DeepSeek web GUI, so every session created
  *   here is persisted to the shared session store and appears in the web GUI's
  *   session list.
+ * - Spawns the job under a git write guard (`./git-guard.cjs`) by default, so a
+ *   delegated agent cannot commit to the caller's branch or push; the result
+ *   reports the guard, and `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1` opts out.
  *
  * Logs go to stderr only; stdout carries MCP protocol traffic only.
  */
@@ -21,6 +24,12 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const readline = require('node:readline')
+const {
+  gitWritesAllowed,
+  guardEnvironment,
+  guardRoot,
+  installGitWriteGuard,
+} = require('./git-guard.cjs')
 
 // ---------------------------------------------------------------------------
 // Configuration (env-overridable)
@@ -403,6 +412,47 @@ function startWorkspaceAttach(sessionId, cwd) {
 }
 
 // ---------------------------------------------------------------------------
+// Git write guard
+// ---------------------------------------------------------------------------
+// One guard per bridge process: every ACP child spawned here carries the same
+// GIT_CONFIG_GLOBAL, so a job's refusals and any sandboxed push are auditable
+// in one directory for the life of the bridge.
+let gitGuard = null
+
+/**
+ * This process's guard, installed on first use.
+ * @returns the guard, or null when the caller opted out with
+ * `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1`.
+ */
+function ensureGitGuard() {
+  if (gitWritesAllowed()) return null
+  if (gitGuard === null) {
+    gitGuard = installGitWriteGuard({ root: guardRoot(), id: `bridge-${process.pid}` })
+    log(gitGuard.ok
+      ? `git write guard: ${gitGuard.directory}`
+      : `git write guard NOT installed: ${gitGuard.error}`)
+  }
+  return gitGuard
+}
+
+/**
+ * The result line that tells the calling model whether this job could write git
+ * history, and where a push would land instead of the real remote.
+ * @returns one line, always present so its absence is never ambiguous.
+ */
+function describeGitWrites() {
+  if (gitWritesAllowed()) {
+    return 'GitWrites: ALLOWED — DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 lets this job commit and push'
+  }
+  const guard = ensureGitGuard()
+  if (guard === null || guard.ok !== true) {
+    return `GitWrites: UNGUARDED — the git write guard is not installed${guard && guard.error ? `: ${guard.error}` : ''}`
+  }
+  return `GitWrites: guarded — commits refused, pushes to a remote named origin redirected to ${guard.sandbox}; `
+    + 'set DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 to allow writes'
+}
+
+// ---------------------------------------------------------------------------
 // ACP client (talks to `dsh --profile acp`)
 // ---------------------------------------------------------------------------
 let acpNextId = 1
@@ -413,7 +463,7 @@ let acpNextId = 1
 const activeSessions = new Map()
 
 class AcpClient {
-  constructor(permission) {
+  constructor(permission, options = {}) {
     this.permission = permission
     this.pending = new Map() // id(string) -> { resolve, reject, timer }
     this.collectedText = ''
@@ -425,7 +475,9 @@ class AcpClient {
     const launch = resolveDshLaunch()
     this.child = spawn(launch.command, launch.args, {
       cwd: launch.cwd,
-      env: { ...process.env, DSH_HOME },
+      // `options.env` carries the git write guard; it merges last so a job can
+      // never inherit a caller's GIT_CONFIG_GLOBAL in place of the guard.
+      env: { ...process.env, DSH_HOME, ...options.env },
       stdio: ['pipe', 'pipe', 'inherit'],
     })
 
@@ -550,8 +602,15 @@ class AcpClient {
 // ---------------------------------------------------------------------------
 // ACP operations
 // ---------------------------------------------------------------------------
-async function withAcp(permission, fn) {
-  const client = new AcpClient(permission)
+/**
+ * Run one operation against a fresh ACP child.
+ * @param permission - permission policy passed to the child.
+ * @param fn - operation receiving the initialized client.
+ * @param options - `env` merged into the child's environment.
+ * @returns whatever `fn` returns.
+ */
+async function withAcp(permission, fn, options = {}) {
+  const client = new AcpClient(permission, options)
   try {
     await client.request('initialize', { protocolVersion: 1, clientCapabilities: {} }, 60000)
     return await fn(client)
@@ -565,6 +624,9 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
   // Resolve before spawning ACP so a broken MCP config fails loud, not mid-turn.
   const resolvedMcp = mcpConfigPath ? resolveMcpServers(mcpConfigPath) : null
   if (resolvedMcp !== null) log(`forwarding MCP servers: ${describeMcpServers(resolvedMcp)}`)
+  // Resolved before the child spawns: installing the guard here is what puts it
+  // in the job's environment, so it must not move inside the callback.
+  const gitWrites = describeGitWrites()
   return withAcp(PERMISSION, async (client) => {
     client.onText = (text) => { if (onProgress) onProgress(text) }
 
@@ -604,7 +666,7 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
           // goes looking for its session in the GUI.
           const text = client.collectedText
           const prefix = text ? `DeepSeek returned partial output before failing:\n\n${text}\n\n---\n` : ''
-          throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}\n${await workspaceAttach}`)
+          throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}\n${await workspaceAttach}\n${gitWrites}`)
         }
         stopReason = result && result.stopReason ? result.stopReason : 'end_turn'
         // A queued update — from a natural stop, or from session/cancel interrupting this
@@ -631,8 +693,9 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
       text: client.collectedText,
       mcp: describeMcpServers(resolvedMcp),
       workspace: await workspaceAttach,
+      gitWrites,
     }
-  })
+  }, { env: guardEnvironment(ensureGitGuard()) })
 }
 
 async function listSessions({ cwd }) {
@@ -654,7 +717,12 @@ const TOOLS = [
       'Delegate a self-contained task to a DeepSeek Harness agent and return its final answer. ' +
       'The work happens in a fresh DeepSeek session that is persisted to the shared store, so it ' +
       'is also visible and resumable in the DeepSeek web GUI session list. ' +
-      'The returned text includes the session id. Use this when you want DeepSeek (not Gemini) to do the work.',
+      'The returned text includes the session id. Use this when you want DeepSeek (not Gemini) to do the work. ' +
+      'The job runs under a git write guard: its commits are refused and a push to a remote named origin lands ' +
+      'in a sandbox instead of the real remote, so ask for the changes it made and apply them yourself; ' +
+      'DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 lifts the guard for a task that genuinely must commit or push. ' +
+      'The result reports the guard state on a GitWrites line. Tell the job to report only what it ran and ' +
+      'observed, never to describe testing it did not do.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -780,6 +848,7 @@ async function handleToolsCall(id, params) {
         `Session is persisted and viewable in the DeepSeek web GUI. cwd=${out.cwd}`,
         out.mcp,
         out.workspace,
+        out.gitWrites,
         '',
         out.text || '(no text output)',
       ].join('\n')

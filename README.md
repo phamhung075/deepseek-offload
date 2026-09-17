@@ -47,7 +47,7 @@ You do not need to read every piece; this table maps each path to the role it pl
 
 | Path | Role |
 | --- | --- |
-| [`.agents/mcp-deepseek/`](.agents/mcp-deepseek/README.md) | The MCP bridge: a zero-dependency stdio server (`server.cjs`) that speaks MCP to the calling client and ACP to a spawned `dsh --profile acp`. Can forward the caller's own MCP servers into the child session. |
+| [`.agents/mcp-deepseek/`](.agents/mcp-deepseek/README.md) | The MCP bridge: a zero-dependency stdio server (`server.cjs`) that speaks MCP to the calling client and ACP to a spawned `dsh --profile acp`. Can forward the caller's own MCP servers into the child session. Its git write guard (`git-guard.cjs`) refuses the job's commits and pushes. |
 | [`.agents/skills/deepseek-offload/`](.agents/skills/deepseek-offload/SKILL.md) | The skill doc for the calling agent: when to offload, the blocking MCP path vs. fire-and-forget background jobs, prompt contracts, safety rules, troubleshooting. |
 | [`.agents/dsh-workspace-attach/`](.agents/dsh-workspace-attach/README.md) | DSH web-profile plugin that files delegated sessions under the project folder they ran in. |
 | [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, optional vision subagent, then `doctor`. `--dry-run`, `--uninstall`, `--json`. |
@@ -164,13 +164,22 @@ predates the plugin.
   auto-accepts every permission prompt, so the child can run shell commands and edit files without
   asking. Set `DEEPSEEK_MCP_PERMISSION=reject` — or pass `--permission reject` — for read-only work,
   and only delegate into workspaces you would trust a script in.
+- **Git history writes are refused, not merely discouraged.** The bridge installs a guard before it
+  spawns a job: hooks refuse `git commit`, `git commit --amend`, merge commits, and `git push`, and a
+  push to a remote named `origin` is redirected to a per-job bare repository, so even `--no-verify`
+  cannot reach the real remote. Your global git config is read first, so identity and aliases still
+  work, and nothing is written into your repository. The result reports the state on a `GitWrites:`
+  line; `dsh-offload.mjs guard <jobId>` shows anything the job pushed. A job whose task genuinely
+  must write history needs `--allow-git-write` (or `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1`).
 - **Forwarded MCP servers act with your credentials.** Forward the narrowest config that does the
   job; `${VAR}` references are expanded from the bridge's environment, so the secrets stay in the
   environment and never in the package.
 - **Nothing here stores secrets.** No API keys, tokens, or absolute user paths are committed; the
   installer writes only profile rows, a plugin symlink, and the MCP entries above.
 - **Review delegated writes.** Run `git status` / `git diff` after any job that writes files; treat a
-  child's output like a patch from a stranger until you have read it.
+  child's output like a patch from a stranger until you have read it. A report is a claim, not
+  evidence: rerun the check that matters, and if you let a job commit, confirm the author identity and
+  message rather than accepting a trailer or a "verified in production" sentence the child invented.
 - **The bridge never forwards itself** — a server named `deepseek`, or a stdio server whose argv
   points back at `server.cjs`, is skipped, so a delegated agent cannot recurse into another one.
 
@@ -187,6 +196,8 @@ Bridge and runner environment (all optional):
 | `DEEPSEEK_MCP_CONFIG` | MCP config forwarded into delegated sessions. |
 | `DEEPSEEK_MCP_SKIP` | Server names never forwarded. |
 | `DEEPSEEK_MCP_TIMEOUT_MS` | Per-turn timeout. Default 15 min. |
+| `DEEPSEEK_MCP_ALLOW_GIT_WRITE` | `1` lets a delegated job commit and push. Default: the git write guard refuses both. |
+| `DEEPSEEK_OFFLOAD_GUARD_DIR` | Where git write guards live. Default `$DSH_HOME/offload-guards`. |
 | `DEEPSEEK_OFFLOAD_MODEL` | Model pinned into the `acp` profile by `install.sh` (`--model` overrides). Default `deepseek-flash`. |
 | `DEEPSEEK_WORKSPACE_ATTACH` | `0` stops asking the GUI to file jobs under their project. |
 | `DEEPSEEK_WORKSPACE_ATTACH_DIR` | Adoption inbox override. |

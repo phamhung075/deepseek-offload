@@ -6,7 +6,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "test": "node --test tests/install.test.mjs tests/session-tail.test.mjs .agents/dsh-workspace-attach/tests/adopt.test.js .agents/dsh-workspace-attach/tests/inbox.test.js",
+    "test": "node --test tests/install.test.mjs tests/session-tail.test.mjs tests/git-guard.test.mjs tests/bridge-guard.test.mjs .agents/dsh-workspace-attach/tests/adopt.test.js .agents/dsh-workspace-attach/tests/inbox.test.js",
     "install-bridge": "./install.sh",
     "doctor": "node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs doctor"
   },

@@ -160,6 +160,7 @@ test('the project gains the skill entry point and both scripts, not just their d
   }))
   assert.deepEqual(entries.map(({ link }) => link), [
     '.agents/mcp-deepseek/server.cjs',
+    '.agents/mcp-deepseek/git-guard.cjs',
     '.agents/dsh-workspace-attach',
     '.agents/skills/deepseek-offload/SKILL.md',
     '.agents/skills/deepseek-offload/scripts/dsh-offload.mjs',

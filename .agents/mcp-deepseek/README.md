@@ -111,6 +111,20 @@ A server that fails to start aborts `session/new` — DSH reports this as a gene
 | `DEEPSEEK_MCP_TIMEOUT_MS` | `900000` | Prompt timeout |
 | `DEEPSEEK_MCP_CONFIG` | *(unset)* | Default client-shaped MCP config forwarded into every session |
 | `DEEPSEEK_MCP_SKIP` | `deepseek` | Comma-separated server names never forwarded |
+| `DEEPSEEK_MCP_ALLOW_GIT_WRITE` | *(unset)* | `1` lets a delegated session commit and push. Default: the git write guard refuses both |
+| `DEEPSEEK_OFFLOAD_GUARD_DIR` | `$DSH_HOME/offload-guards` | Where the per-bridge git write guard lives |
+
+## Git write guard
+
+`git-guard.cjs` builds the environment every delegated session starts with, and it is installed
+before the ACP child spawns. Hooks refuse `git commit`, `git commit --amend`, merge commits, and
+`git push`, and `remote.origin.pushurl` is redirected to a per-bridge bare repository, so a push
+that bypasses the hooks (`--no-verify`) cannot reach the real remote. The user's own global git
+configuration is included first, so identity, aliases, and every other setting keep working; the
+guard overrides only `core.hooksPath` and that push URL, and writes nothing into the caller's
+repository. Each result carries a `GitWrites:` line naming the state and the sandbox, so the calling
+agent can report — or inspect — what a job tried to do. `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1` is the
+deliberate opt-out for a task that genuinely must write history.
 
 ## Choosing the DeepSeek model
 

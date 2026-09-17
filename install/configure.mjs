@@ -799,6 +799,9 @@ function projectLinks(project) {
   })
   return [
     { link: path.join(project, '.agents', 'mcp-deepseek', 'server.cjs'), target: path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'server.cjs') },
+    // The bridge requires its git write guard as a sibling, so the guard is a
+    // project entry of its own rather than part of a linked directory.
+    { link: path.join(project, '.agents', 'mcp-deepseek', 'git-guard.cjs'), target: path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'git-guard.cjs') },
     { link: path.join(project, '.agents', 'dsh-workspace-attach'), target: path.join(PACKAGE_ROOT, '.agents', 'dsh-workspace-attach') },
     // `SKILL.md` is what makes the directory a skill the calling agent loads,
     // and `session-tail.mjs` is the tailer every doc tells the reader to run.

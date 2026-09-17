@@ -5,6 +5,18 @@ your conversation, only to the workspace on disk.
 
 Every template keeps the **return** small — that is where the caller's token saving comes from.
 
+Two lines belong in any template that touches a git repository. The first is enforced by the bridge
+regardless (SKILL.md §8), but say it anyway so the child plans around it rather than treating a
+refusal as an obstacle to work around; the second is what keeps a report trustworthy, because a
+child that cannot commit is still able to claim it verified something:
+
+```
+Git policy: do not commit, push, tag, or rewrite history. Report the change and let the caller
+review and apply it.
+Evidence rule: state only what you ran and observed, with the command and its output. Never
+describe a test, deployment, or production check you did not perform.
+```
+
 ---
 
 ## 1. Read-only audit (the default workhorse)
@@ -24,6 +36,7 @@ Then, at most 5 lines of "Notes" for anything you could not verify.
 
 Evidence rule: cite only paths and lines you actually read. Never guess a line number.
 Write policy: read-only. Do not modify, create, or delete any file.
+Git policy: do not commit, push, tag, or rewrite history; report, and the caller applies.
 Budget: at most 400 words.
 ```
 
@@ -43,6 +56,7 @@ Output contract:
     "unverified:" explicitly.
 
 Write policy: write only under scratch/ (rule 05 — personal data and scratch isolation).
+Git policy: do not commit, push, tag, or rewrite history; report the path and the caller commits it.
 Budget: file ≤ 800 words; returned summary ≤ 120 words.
 ```
 

@@ -10,7 +10,8 @@ description: >-
   `cancel` to stop a still-running job, `window` to check DeepSeek's peak/off-peak
   pricing, and `start --defer-to-off-peak` to schedule batch work for half price),
   how to follow a running job (the web GUI lists its session but cannot show it
-  live), prompt contracts for self-contained jobs, and the security and token rules.
+  live), prompt contracts for self-contained jobs, the git write guard that refuses
+  commits and pushes by default, and the security and token rules.
 ---
 
 # DeepSeek Background Offload — delegating work from other LLMs
@@ -186,6 +187,7 @@ node "$OFF" start "<self-contained task>" --cwd "$PWD" --label audit-licensing
 node "$OFF" start "<batch job>" --cwd "$PWD" --defer-to-off-peak --detach  # wait for half price
 node "$OFF" status  <jobId>
 node "$OFF" result  <jobId>
+node "$OFF" guard   <jobId>               # did the job try to commit or push, and where did it land?
 node "$OFF" update  <jobId> "<new information / corrected direction>"
 node "$OFF" cancel  <jobId>               # stop outright, no redirect
 node "$OFF" wait    <jobId> --timeout-ms 900000
@@ -201,6 +203,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. `--detach` returns instantly. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
 | `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
 | `result` | Final report text. | `0` done, `1` error, `2` still running |
+| `guard` | The job's git write guard state, plus any refs a guarded push landed in the sandbox instead of the real remote. | `0` |
 | `update` | Relays new information to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
 | `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
@@ -209,8 +212,8 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
 
 Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-config FILE`,
-`--label NAME`, `--permission allow|reject`, `--timeout-ms N`, `--detach`, `--wait-session-ms N`,
-`--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
+`--label NAME`, `--permission allow|reject`, `--allow-git-write`, `--timeout-ms N`, `--detach`,
+`--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
 shows for it: an idle row under the project folder, never live progress. Report progress yourself
@@ -289,6 +292,8 @@ Every job prompt must contain:
 4. **Output contract** — the exact format you'll parse, and a word budget.
 5. **Write policy** — "read-only" or "write only under `scratch/`", and where.
 6. **Evidence rule** — "cite files/commands you actually ran; mark anything unverified".
+7. **Git policy** — "report the change; do not commit, push, tag, or rewrite history". This one is
+   enforced, not merely asked: see the guard in §8.
 
 Keep the return small — ask for findings, not a transcript. The bridge opens a **new session per
 call**: a follow-up is a new job that receives the previous report; a human can continue the
@@ -298,6 +303,16 @@ original session in the GUI.
 
 ## 8. Mandatory rules and safety
 
+- **A delegated job cannot commit or push by default — that is a barrier, not a request.** The
+  bridge installs a git write guard before it spawns the job: `core.hooksPath` points at hooks that
+  refuse `git commit`, `git commit --amend`, merge commits, and `git push`, and `remote.origin.pushurl`
+  points at a per-job bare repository, so a push that bypasses the hooks (`--no-verify`) still cannot
+  reach the real remote. The hooks live in `$DSH_HOME/offload-guards/bridge-<pid>/`, nothing is
+  written to the repository or to your global git config, and your own global config is still read
+  first, so identity and aliases keep working. The job's result carries the state on a `GitWrites:`
+  line, and `node "$OFF" guard <jobId>` shows whether it pushed and where. A job that genuinely must
+  commit or push needs `--allow-git-write` (or `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1` on a direct
+  `deepseek_agent` call) — grant it only with a task that requires it, and still review the diff.
 - **Keep personal data out of shared trees.** Point child output at a scratch directory (this
   repository's convention is `scratch/`), never at tracked paths, and never ask a child to commit
   personal data.
@@ -312,6 +327,12 @@ original session in the GUI.
   commit or push a child's work unreviewed, and read it as if a stranger wrote it. A child inherits
   nothing of your rules, so state the project's constraints (gated directories, licensing, publish
   rules) explicitly in the prompt, and scope every write job to the paths it may touch.
+- **A child's report is a claim, not evidence — and its commits must not impersonate you.** Verify
+  what matters by rerunning the check yourself. Watch for reports that describe verification nobody
+  performed ("confirmed against production data" when only a sandbox was touched): ask for the exact
+  command and its output instead. When you grant `--allow-git-write`, read the commit you get: the
+  author identity, the message, and any `Co-Authored-By` or session trailer must be yours or absent,
+  never invented by the child.
 - **Delegation isn't a substitute for judgment.** Verify claims that matter; say which parts came
   from a delegated job.
 - **Budget.** Default child timeout is 15 minutes. One job = one DSH session = visible to the
@@ -330,6 +351,8 @@ original session in the GUI.
 | Job `state: error`, worker gone | Worker died (crash/reboot) — read `scratch/dsh-offload/jobs/<jobId>.worker.log`. |
 | `wait` times out, job still running | Not stuck — raise `--timeout-ms`; check `status`, or follow the session log with `scripts/session-tail.mjs <jobId> --watch`. |
 | Result ends mid-sentence | ACP prompt timeout (`DEEPSEEK_MCP_TIMEOUT_MS`) — split the job or raise it. |
+| Child reports `git commit refused` / `git push refused` | The guard working as intended. The child must report the change instead; the caller applies it. Pass `--allow-git-write` only when the task genuinely needs to write history. |
+| Job report says `GitWrites: UNGUARDED` | The guard could not install (usually `git` missing from the bridge's `PATH`), so nothing was contained — treat the job's git writes as the child's word and check the repository before trusting it. |
 | `does not declare image input` on an image job | The pinned id is absent from the `acp` profile's model catalog, which a patch replaces: re-run `install.sh`, then `doctor` (`model accepts images`). |
 | `session/new` fails with bare `Internal error` | A forwarded MCP server didn't start — run `mcp-servers --mcp-config <file>` to find which. |
 | `references unset environment variable X` | Forwarded config uses `${X}`, bridge's env lacks it — export it in the launching shell. |
@@ -343,4 +366,5 @@ original session in the GUI.
 - [../../../INSTALL.md](../../../INSTALL.md) — the install runbook: to set this package up in a project, follow it phase by phase instead of assembling the steps from this file.
 - [references/prompt-templates.md](references/prompt-templates.md) — copy-paste job prompts.
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.
+- [../../mcp-deepseek/git-guard.cjs](../../mcp-deepseek/git-guard.cjs) — the git write guard the bridge installs before spawning a job.
 - [../../mcp-deepseek/README.md](../../mcp-deepseek/README.md) — bridge setup and env vars.
