@@ -8,14 +8,19 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { afterEach, test } from 'node:test'
-import { acpCatalogRows, hasRows, linkEntry, projectLinks, stripFencedBlock, stripLoaderRow } from '../install/configure.mjs'
+import {
+  acpCatalogRows, applyOrchestratorRule, hasRows, linkEntry, projectLinks,
+  removeOrchestratorRule, ruleInjection, RULE_BEGIN, RULE_END,
+  stripFencedBlock, stripLoaderRow,
+} from '../install/configure.mjs'
 
 const FENCE = '# bridge: begin'
 const FENCE_END = '# bridge: end'
+const RULE_BLOCK = [RULE_BEGIN, '## Orchestrator rule — test', '', 'Body.', RULE_END].join('\n')
 
 const roots = []
 afterEach(() => {
@@ -205,4 +210,112 @@ test('a project child whose name begins with dots is inside, not a climb out', (
 
   assert.equal(isAbsolute(readlinkSync(link)), false)
   assert.equal(realpathSync(link), realpathSync(target))
+})
+
+test('the orchestrator rule lands after the first H1 and its blockquote lines', () => {
+  const source = '# Title\n> tagline\n\n## Section\ntext\n'
+  const { text, status } = ruleInjection(source, RULE_BLOCK)
+  assert.equal(status, 'inserted')
+  assert.equal(text, `# Title\n> tagline\n\n${RULE_BLOCK}\n\n## Section\ntext\n`)
+})
+
+test('a file without an H1 gets the rule at the top', () => {
+  const source = '## Section\ntext\n'
+  const { text, status } = ruleInjection(source, RULE_BLOCK)
+  assert.equal(status, 'inserted')
+  assert.equal(text, `${RULE_BLOCK}\n\n## Section\ntext\n`)
+})
+
+test('re-applying the same rule is byte-identical and reported unchanged', () => {
+  const first = ruleInjection('# Title\n\n## Section\n', RULE_BLOCK)
+  assert.equal(first.status, 'inserted')
+  const second = ruleInjection(first.text, RULE_BLOCK)
+  assert.equal(second.status, 'unchanged')
+  assert.equal(second.text, first.text)
+})
+
+test('a changed rule body updates only the fenced region', () => {
+  const inserted = ruleInjection('# Title\n\nbefore\n\n## Section\n', RULE_BLOCK).text
+  const changed = [RULE_BEGIN, '## Orchestrator rule — changed', '', 'New body.', RULE_END].join('\n')
+  const { text, status } = ruleInjection(inserted, changed)
+  assert.equal(status, 'updated')
+  assert.match(text, /^# Title\n\n/)
+  assert.match(text, /\n\nbefore\n\n## Section\n$/)
+  assert.match(text, /Orchestrator rule — changed/)
+  assert.doesNotMatch(text, /Body\./)
+  assert.equal(text.split(RULE_BEGIN).length - 1, 1, 'the fence is not duplicated')
+})
+
+test('a hand-written orchestrator rule is kept, not overwritten', () => {
+  const source = '# Title\n\nThe rule: THE DEEPSEEK HARNESS IS THE WORKER.\n'
+  const { text, status } = ruleInjection(source, RULE_BLOCK)
+  assert.equal(status, 'kept')
+  assert.equal(text, source)
+})
+
+test('a symlinked CLAUDE.md writes through to AGENTS.md once and stays a link', () => {
+  const project = scratch('rule-link')
+  seed(join(project, 'AGENTS.md'), '# Agents\n\nkeep me\n')
+  symlinkSync('AGENTS.md', join(project, 'CLAUDE.md'))
+
+  const results = applyOrchestratorRule(project, {})
+
+  assert.equal(results.length, 1, 'the symlink and its target are one file')
+  assert.equal(results[0].status, 'inserted')
+  assert.equal(results[0].file, realpathSync(join(project, 'AGENTS.md')))
+  assert.equal(lstatSync(join(project, 'CLAUDE.md')).isSymbolicLink(), true)
+  const text = readFileSync(join(project, 'AGENTS.md'), 'utf8')
+  assert.equal(text.split(RULE_BEGIN).length - 1, 1, 'the rule is inserted once')
+  assert.match(text, /keep me/)
+})
+
+test('a project with neither instruction file gains CLAUDE.md with only the rule', () => {
+  const project = scratch('rule-create')
+
+  const results = applyOrchestratorRule(project, {})
+
+  assert.equal(results.length, 1)
+  assert.equal(results[0].file, join(project, 'CLAUDE.md'))
+  assert.equal(existsSync(join(project, 'AGENTS.md')), false)
+  const text = readFileSync(join(project, 'CLAUDE.md'), 'utf8')
+  assert.ok(text.startsWith(RULE_BEGIN))
+  assert.ok(text.trimEnd().endsWith(RULE_END))
+})
+
+test('removing the rule restores the surrounding text byte for byte', () => {
+  const project = scratch('rule-remove')
+  const file = join(project, 'CLAUDE.md')
+  const original = '# Title\n> tagline\n\n## Section\nkeep me\n'
+  seed(file, original)
+  const applied = applyOrchestratorRule(project, {})
+  assert.equal(applied[0].status, 'inserted')
+  assert.notEqual(readFileSync(file, 'utf8'), original)
+
+  const removed = removeOrchestratorRule(project, {})
+
+  assert.equal(removed[0].status, 'removed')
+  assert.equal(readFileSync(file, 'utf8'), original)
+})
+
+test('a dry run reports the insertion and writes nothing', () => {
+  const project = scratch('rule-dry')
+  const seeded = join(project, 'CLAUDE.md')
+  seed(seeded, '# Title\n\nkeep me\n')
+
+  const results = applyOrchestratorRule(project, { dryRun: true })
+
+  assert.equal(results[0].status, 'inserted')
+  assert.equal(readFileSync(seeded, 'utf8'), '# Title\n\nkeep me\n')
+})
+
+test('an explicit rule file replaces the default candidates', () => {
+  const project = scratch('rule-file')
+  const target = join(project, 'docs', 'INSTRUCTIONS.md')
+
+  const results = applyOrchestratorRule(project, { ruleFiles: [join('docs', 'INSTRUCTIONS.md')] })
+
+  assert.equal(results.length, 1)
+  assert.equal(results[0].file, target)
+  assert.equal(existsSync(target), true)
+  assert.equal(existsSync(join(project, 'CLAUDE.md')), false)
 })

@@ -13,17 +13,21 @@
  * 3. Web profile — point one loader row at this package's workspace-attach
  *    plugin, through a stable symlink under `$DSH_HOME/plugins/`, so several
  *    projects can each install from their own copy without competing for the row.
- * 4. Project — optionally register the bridge as a stdio MCP server for Claude
+ * 4. Project — inject the orchestrator rule into the project's `CLAUDE.md`/
+ *    `AGENTS.md`, inside managed comment fences, so delegation is the project's
+ *    default instead of something the human has to ask for.
+ * 5. Project — optionally register the bridge as a stdio MCP server for Claude
  *    Code (`.mcp.json`) and Gemini/Antigravity (`.agents/mcp_config.json`).
- * 5. Harness checkout — optionally add the `read_image_vision` subagent to the
+ * 6. Harness checkout — optionally add the `read_image_vision` subagent to the
  *    `standard` preset, so a session on a text-only model can still read images
  *    by delegating to the vision model.
- * 6. Verify — run the runner's `doctor`, which reports whether the workspace
+ * 7. Verify — run the runner's `doctor`, which reports whether the workspace
  *    plugin is answering and where the GUI is.
  *
  * Usage (normally through `install.sh`):
  *   node install/configure.mjs [--project DIR] [--dsh-root DIR] [--dsh-home DIR]
  *                              [--with-mcp-config] [--with-vision-subagent]
+ *                              [--no-agent-rule] [--rule-file PATH]
  *                              [--dry-run] [--uninstall] [--json]
  *
  * The profile patches are user-owned files: this script edits their text and
@@ -65,6 +69,14 @@ const CATALOG_END = '# deepseek-offload: acp model catalog — end'
 const PLUGIN_BEGIN = '# deepseek-offload: workspace grouping plugin — begin'
 const PLUGIN_END = '# deepseek-offload: workspace grouping plugin — end'
 
+/** Canonical rule body injected into a project's instruction files. */
+const RULE_TEMPLATE = path.join(PACKAGE_ROOT, 'install', 'templates', 'orchestrator-rule.md')
+/** Markdown comment fences around that rule; `stripFencedBlock` matches trimmed lines. */
+const RULE_BEGIN = '<!-- deepseek-offload: orchestrator rule — begin -->'
+const RULE_END = '<!-- deepseek-offload: orchestrator rule — end -->'
+/** Text a hand-written rule carries; it means the installer must not touch the file. */
+const RULE_SENTINEL = 'THE DEEPSEEK HARNESS IS THE WORKER'
+
 /** Model ids the provider's own catalog declares as accepting image input. */
 const VISION_MODEL_IDS = new Set(['deepseek-flash', 'deepseek-v4-flash-vision-exp'])
 
@@ -73,7 +85,11 @@ const log = (...parts) => process.stdout.write(`${parts.join(' ')}\n`)
 const warn = (...parts) => process.stderr.write(`deepseek-offload: ${parts.join(' ')}\n`)
 
 /** Text-surgery and project-wiring helpers, exported for tests; `main` is the only entry point. */
-export { acpCatalogRows, hasRows, linkEntry, projectLinks, stripFencedBlock, stripLoaderRow }
+export {
+  acpCatalogRows, applyOrchestratorRule, hasRows, linkEntry, projectLinks,
+  removeOrchestratorRule, ruleInjection, RULE_BEGIN, RULE_END, RULE_SENTINEL,
+  stripFencedBlock, stripLoaderRow,
+}
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main()
@@ -122,6 +138,15 @@ function main() {
     wireProject(project)
   }
 
+  // The orchestrator rule is what makes delegation automatic; it is the one
+  // project instruction file this installer owns.
+  let ruleResults = []
+  if (args['no-agent-rule'] === true) {
+    log('note       project instruction files untouched (--no-agent-rule)')
+  } else {
+    ruleResults = applyOrchestratorRule(project, { dryRun: args['dry-run'] === true, ruleFiles: ruleFileList() })
+  }
+
   if (args['with-mcp-config']) {
     for (const file of mcpFiles) registerMcpServer(file, project)
   } else {
@@ -131,7 +156,7 @@ function main() {
   if (args['with-vision-subagent']) addVisionSubagent(dshRoot)
 
   verify(project, home)
-  summarise(project)
+  summarise(project, ruleResults)
 }
 
 /**
@@ -291,12 +316,17 @@ function readlinkOrNull(file) {
  * Close with the two facts a caller needs and cannot guess: how a job is
  * started here, and that a running GUI has to reload.
  */
-function summarise(project) {
+function summarise(project, ruleResults = []) {
   if (args['dry-run'] || args.json) return
   const runner = path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs')
   const relative = path.relative(project, runner)
   const shown = relative === '' || relative.startsWith('..') ? runner : relative
   log('')
+  for (const { file, status } of ruleResults) {
+    const ruleRelative = path.relative(project, file)
+    log(`rule       ${ruleRelative === '' || ruleRelative.startsWith('..') ? file : ruleRelative} — ${status}`)
+  }
+  if (ruleResults.length > 0) log('')
   log('next steps')
   const tailer = path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs')
   const tailRelative = path.relative(project, tailer)
@@ -310,20 +340,25 @@ function summarise(project) {
 /** Parse `--flag value`, `--flag=value`, and bare `--flag` arguments. */
 function parseArgs(argv) {
   const parsed = {}
+  // `--rule-file` names one target per occurrence, so repeats accumulate.
+  const repeatable = new Set(['rule-file'])
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
     if (!token.startsWith('--')) continue
     const [flag, inline] = token.slice(2).split('=')
+    const store = (value) => {
+      parsed[flag] = repeatable.has(flag) ? [...(Array.isArray(parsed[flag]) ? parsed[flag] : []), value] : value
+    }
     if (inline !== undefined) {
-      parsed[flag] = inline
+      store(inline)
       continue
     }
     const next = argv[index + 1]
     if (next !== undefined && !next.startsWith('--')) {
-      parsed[flag] = next
+      store(next)
       index += 1
     } else {
-      parsed[flag] = true
+      store(true)
     }
   }
   return parsed
@@ -580,6 +615,181 @@ function stripFencedBlock(source, begin, end) {
 }
 
 /**
+ * The rule block as it is written: the fence lines around the template body.
+ * @param template - template file contents.
+ * @returns the fenced block, without surrounding blank lines.
+ */
+function renderRuleBlock(template) {
+  return [RULE_BEGIN, template.trim(), RULE_END].join('\n')
+}
+
+/**
+ * Insert the block after the first level-1 heading and any blockquote or blank
+ * lines that follow it, or at the top when there is no H1, with one blank line
+ * on each side.
+ * @param source - file contents.
+ * @param block - the fenced rule block.
+ * @returns the new file contents.
+ */
+function insertRuleBlock(source, block) {
+  const lines = source.split('\n')
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  let at = lines.findIndex(line => /^#\s/.test(line))
+  if (at === -1) {
+    at = 0
+  } else {
+    at += 1
+    while (at < lines.length && (lines[at].trim() === '' || lines[at].trimStart().startsWith('>'))) at += 1
+  }
+  const head = lines.slice(0, at)
+  while (head.length > 0 && head[head.length - 1].trim() === '') head.pop()
+  const tail = lines.slice(at)
+  while (tail.length > 0 && tail[0].trim() === '') tail.shift()
+  const parts = []
+  if (head.length > 0) parts.push(head.join('\n'))
+  parts.push(block)
+  if (tail.length > 0) parts.push(tail.join('\n'))
+  return `${parts.join('\n\n')}\n`
+}
+
+/**
+ * Insert, replace in place, or leave alone the fenced rule in one file's text.
+ * A file that already has the fence is updated where the fence sits; a file that
+ * carries the sentinel without a fence has a hand-written rule and is kept.
+ * @param source - file contents.
+ * @param block - the fenced rule block to write.
+ * @returns the new contents and what happened: inserted, updated, unchanged or kept.
+ */
+function ruleInjection(source, block) {
+  const { block: current } = stripFencedBlock(source, RULE_BEGIN, RULE_END)
+  if (current !== '') {
+    if (current === block) return { text: source, status: 'unchanged' }
+    const at = source.indexOf(current)
+    return { text: `${source.slice(0, at)}${block}${source.slice(at + current.length)}`, status: 'updated' }
+  }
+  if (source.includes(RULE_SENTINEL)) return { text: source, status: 'kept' }
+  return { text: insertRuleBlock(source, block), status: 'inserted' }
+}
+
+/**
+ * Remove the fenced rule and the blank line that surrounded it, restoring the
+ * rest of the file as the installer found it.
+ * @param source - file contents.
+ * @returns the new contents and whether a fence was removed.
+ */
+function removeRuleBlock(source) {
+  const { block } = stripFencedBlock(source, RULE_BEGIN, RULE_END)
+  if (block === '') return { text: source, removed: false }
+  const at = source.indexOf(block)
+  let before = source.slice(0, at)
+  let after = source.slice(at + block.length)
+  if (before === '' && after === '\n') return { text: '', removed: true }
+  if (after.startsWith('\n\n')) after = after.slice(2)
+  else if (before.endsWith('\n\n')) before = before.slice(0, -2)
+  return { text: before + after, removed: true }
+}
+
+/**
+ * The real instruction files the rule belongs in. CLAUDE.md is commonly a
+ * symlink to AGENTS.md (or both point at `.agents/AGENTS.md`), so candidates are
+ * resolved and de-duplicated; a project with neither gets a new CLAUDE.md.
+ * @param project - absolute project directory.
+ * @param ruleFiles - explicit candidates from `--rule-file`, replacing the default.
+ * @returns absolute paths to write, each real file once.
+ */
+function orchestratorRuleFiles(project, ruleFiles) {
+  const candidates = ruleFiles !== undefined && ruleFiles.length > 0
+    ? ruleFiles.map(file => (path.isAbsolute(file) ? file : path.join(project, file)))
+    : [path.join(project, 'CLAUDE.md'), path.join(project, 'AGENTS.md')]
+  const files = []
+  const seen = new Set()
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue
+    const real = fs.realpathSync(candidate)
+    if (seen.has(real)) continue
+    seen.add(real)
+    files.push(real)
+  }
+  return files.length > 0 ? files : [candidates[0]]
+}
+
+/** `--rule-file` values, or undefined for the default CLAUDE.md/AGENTS.md candidates. */
+function ruleFileList() {
+  const raw = args['rule-file']
+  if (!Array.isArray(raw)) return undefined
+  const files = raw.filter(file => typeof file === 'string' && file !== '')
+  return files.length > 0 ? files : undefined
+}
+
+/**
+ * Inject the orchestrator rule into the project's instruction files, so
+ * delegation is the project's default without the human asking for it.
+ * @param project - absolute project directory.
+ * @param options - `dryRun`, `ruleFiles` (candidate override), `templatePath`.
+ * @returns one `{ file, status }` per target, status inserted|updated|unchanged|kept.
+ */
+function applyOrchestratorRule(project, { dryRun = false, ruleFiles, templatePath = RULE_TEMPLATE } = {}) {
+  if (path.resolve(project) === path.resolve(PACKAGE_ROOT)) {
+    log('note       orchestrator rule skipped: the project is this package')
+    return []
+  }
+  const template = readText(templatePath)
+  if (template.trim() === '') {
+    warn(`no orchestrator rule template at ${templatePath}; skipping`)
+    return []
+  }
+  const block = renderRuleBlock(template)
+  const results = []
+  for (const file of orchestratorRuleFiles(project, ruleFiles)) {
+    const { text, status } = ruleInjection(readText(file), block)
+    results.push({ file, status })
+    if (status === 'kept') {
+      log(`kept       ${file} (already carries a hand-written orchestrator rule; not overwritten)`)
+      continue
+    }
+    if (status === 'unchanged') {
+      log(`unchanged  ${file} (orchestrator rule)`)
+      continue
+    }
+    if (dryRun) {
+      log(`would write ${file} (orchestrator rule)`)
+      continue
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, text)
+    log(`wrote      ${file} (orchestrator rule)`)
+  }
+  return results
+}
+
+/**
+ * Remove the managed orchestrator rule from the project's instruction files.
+ * @param project - absolute project directory.
+ * @param options - `dryRun`, `ruleFiles`.
+ * @returns one `{ file, status }` per removed file.
+ */
+function removeOrchestratorRule(project, { dryRun = false, ruleFiles } = {}) {
+  if (path.resolve(project) === path.resolve(PACKAGE_ROOT)) return []
+  const results = []
+  for (const file of orchestratorRuleFiles(project, ruleFiles)) {
+    if (!fs.existsSync(file)) continue
+    const { text, removed } = removeRuleBlock(readText(file))
+    if (!removed) {
+      log(`skipped    ${file} (no managed orchestrator rule)`)
+      continue
+    }
+    results.push({ file, status: 'removed' })
+    if (dryRun) {
+      log(`would clean ${file} (orchestrator rule)`)
+      continue
+    }
+    fs.writeFileSync(file, text)
+    log(`cleaned    ${file} (orchestrator rule)`)
+  }
+  return results
+}
+
+/**
  * Remove one `- id: <id>` row from a patch layer, including the `- insert:`
  * parent when this was its only child.
  */
@@ -773,6 +983,11 @@ function uninstall({ acpPatch, webPatch, pluginDir, mcpFiles, project }) {
   removePluginInstall(pluginDir)
   for (const { link } of projectLinks(project)) removeOwnedLink(link)
   for (const file of mcpFiles) unregisterMcpServer(file)
+  if (args['no-agent-rule'] === true) {
+    log('note       project instruction files untouched (--no-agent-rule)')
+  } else {
+    removeOrchestratorRule(project, { dryRun: args['dry-run'] === true, ruleFiles: ruleFileList() })
+  }
   log('note       the GUI keeps its own workspace registrations; this only unwires the package')
 }
 

@@ -60,6 +60,10 @@ const DEFAULT_PERMISSION = process.env.DEEPSEEK_MCP_PERMISSION || 'allow'
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEEPSEEK_MCP_TIMEOUT_MS || 15 * 60 * 1000)
 const GUI_URL = process.env.DSH_GUI_URL || 'http://127.0.0.1:3080'
 
+/** Fence and sentinel the installer's orchestrator rule carries, so doctor can find it. */
+const ORCHESTRATOR_RULE_BEGIN = '<!-- deepseek-offload: orchestrator rule — begin -->'
+const ORCHESTRATOR_RULE_SENTINEL = 'THE DEEPSEEK HARNESS IS THE WORKER'
+
 /** Sibling live tailer: the only way to follow a run the GUI cannot stream. */
 const SESSION_TAIL = path.join(path.dirname(fileURLToPath(import.meta.url)), 'session-tail.mjs')
 
@@ -1568,6 +1572,37 @@ function catalogDeclaresImage(patchText, id) {
 }
 
 /**
+ * The real project instruction files the orchestrator rule lives in. CLAUDE.md
+ * is commonly a symlink to AGENTS.md, so candidates are resolved and
+ * de-duplicated; a project with neither reports the CLAUDE.md it would gain.
+ * @param project - absolute project directory.
+ * @returns absolute paths to check, at least one.
+ */
+function orchestratorRuleFiles(project) {
+  const candidates = [path.join(project, 'CLAUDE.md'), path.join(project, 'AGENTS.md')]
+  const files = []
+  const seen = new Set()
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue
+    const real = fs.realpathSync(candidate)
+    if (seen.has(real)) continue
+    seen.add(real)
+    files.push(real)
+  }
+  return files.length > 0 ? files : [candidates[0]]
+}
+
+/**
+ * Whether instruction text carries the managed rule block or a hand-written rule.
+ * @param text - file contents.
+ * @returns true when either form is present.
+ */
+function hasOrchestratorRule(text) {
+  return text.split('\n').some(line => line.trim() === ORCHESTRATOR_RULE_BEGIN)
+    || text.includes(ORCHESTRATOR_RULE_SENTINEL)
+}
+
+/**
  * Verify the toolchain prerequisites and the two facts that decide whether a
  * delegated session will be grouped under its project folder: the workspace
  * plugin must be answering, and the GUI must be running to answer at all.
@@ -1655,6 +1690,13 @@ async function commandDoctor(_positional, flags) {
   } else {
     push('workspace grouping', true, `GUI not running — adoption requests queue in ${WORKSPACE_ATTACH_DIR} and are applied when \`dsh web\` starts`)
   }
+
+  // The orchestrator rule lives in the project's own instruction files; a
+  // hand-written rule counts, so this only fails when the project has neither.
+  const ruleFiles = orchestratorRuleFiles(PROJECT_ROOT)
+  const ruleFile = ruleFiles.find(file => fs.existsSync(file) && hasOrchestratorRule(fs.readFileSync(file, 'utf8')))
+  push('orchestrator rule', ruleFile !== undefined, ruleFile
+    ?? `${ruleFiles.join(' or ')} has no managed orchestrator rule — re-run install.sh to insert it`)
 
   if (flags.json === true) {
     print({ checks, ok: checks.every((check) => check.ok) }, true)

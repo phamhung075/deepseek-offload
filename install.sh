@@ -36,6 +36,10 @@ deepseek-offload install.sh
                            (default: allow — delegated work runs unattended)
   --no-project-links       do not create the project's .agents entries
                            (bridge, plugin, skill)
+  --no-agent-rule          do not inject the orchestrator rule into the
+                           project's CLAUDE.md/AGENTS.md
+  --rule-file PATH         inject the rule into PATH instead of the default
+                           CLAUDE.md/AGENTS.md candidates (repeatable)
   --link-plugin            symlink the workspace plugin into $DSH_HOME
                            instead of copying it (for plugin development)
   --model NAME             model every delegated session runs on

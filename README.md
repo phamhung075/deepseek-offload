@@ -91,14 +91,17 @@ What it wires, and why each piece is needed:
 | `$DSH_HOME/plugins/dsh-workspace-attach` | Installs the workspace plugin (a copy, so it survives this package moving or being deleted). |
 | Web profile | Adds one fenced loader row pointing at that plugin. |
 | Project `.agents/` | Links the bridge (`.agents/mcp-deepseek/server.cjs`), the plugin, and the skill — its `SKILL.md`, both runner scripts, and its references — into the project. A path the project already has is **never** overwritten. |
+| Project instruction files | Inserts the managed orchestrator rule into `CLAUDE.md`/`AGENTS.md` (symlinks resolved, written through), so delegation is the project default. A hand-written rule is kept. |
 | Project MCP configs | With `--with-mcp-config`: registers `deepseek` in `.mcp.json` (Claude Code) and `.agents/mcp_config.json` (Gemini/Antigravity). |
 | Harness checkout | With `--with-vision-subagent`: adds the `read_image_vision` subagent to the `standard` preset. |
 | Verify | Runs `doctor`: model pin, plugin liveness, GUI URL. |
 
 Flags: `--project DIR` (default: current directory), `--dsh-home DIR`, `--dsh-root DIR`, `--model NAME`,
 `--permission allow|reject` (written into the MCP entry; `reject` for read-only or untrusted
-workspaces), `--with-mcp-config`, `--with-vision-subagent`, `--no-project-links`, `--link-plugin`,
-`--dry-run` (print the plan, write nothing), `--uninstall`, `--json`.
+workspaces), `--with-mcp-config`, `--with-vision-subagent`, `--no-project-links`,
+`--no-agent-rule` (skip the project instruction files), `--rule-file PATH` (inject the rule there
+instead of the default `CLAUDE.md`/`AGENTS.md` candidates; repeatable), `--link-plugin`, `--dry-run`
+(print the plan, write nothing), `--uninstall`, `--json`.
 
 If the GUI was already running, reload the page once so the new profile row activates — the `web`
 profile is `patchReload: live`, so no restart is needed. Then start a job:

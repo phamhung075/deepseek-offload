@@ -25,10 +25,11 @@ echo "DSH_HOME=${DSH_HOME:-<unset>}  DSH_ROOT=${DSH_ROOT:-<unset>}  DSH_BIN=${DS
 command -v dsh || true
 ls -d ~/.dsh 2>/dev/null; ls ~/.dsh/profiles 2>/dev/null
 cd <project> && git submodule status; ls -la .agents 2>/dev/null
+cd <project> && ls -la CLAUDE.md AGENTS.md 2>/dev/null; ls .claude/agents 2>/dev/null
 curl -s -o /dev/null -w 'gui %{http_code}\n' "${DSH_GUI_URL:-http://127.0.0.1:3080}/"
 ```
 
-Record five things, and state them back to the human in one message:
+Record six things, and state them back to the human in one message:
 
 | Fact | Where it comes from | Why it matters |
 | --- | --- | --- |
@@ -37,6 +38,7 @@ Record five things, and state them back to the human in one message:
 | `DSH_HOME` | `$DSH_HOME`, else `~/.dsh` | The bridge and the GUI **must** share it, or sessions never appear in the GUI. |
 | Is the GUI running | the `curl` line (`000` = down; `200`, `401`, anything else = up — it may require auth) | Decides the reload note in Phase 5. |
 | Does the project already have `.agents` pieces | `ls -la .agents` | Pre-existing files are kept, not overwritten — tell the human what will not change. |
+| Project instruction files | `ls -la CLAUDE.md AGENTS.md`; read them for a delegation rule; `ls .claude/agents/*.md` and any docs roster | Decides which real file the managed orchestrator-rule block lands in (symlinks resolved), whether it is inserted or kept, and which competing Claude-subagent routes must be reported after the install. |
 
 Decision points:
 
@@ -96,6 +98,7 @@ would link /…/<project>/.agents/skills/deepseek-offload/SKILL.md -> package
 would link /…/<project>/.agents/skills/deepseek-offload/scripts/dsh-offload.mjs -> package
 would link /…/<project>/.agents/skills/deepseek-offload/scripts/session-tail.mjs -> package
 would link /…/<project>/.agents/skills/deepseek-offload/references -> package
+would write /…/<project>/CLAUDE.md (orchestrator rule)
 would register the deepseek server in /…/<project>/.mcp.json
 would register the deepseek server in /…/<project>/.agents/mcp_config.json
 dry run — nothing verified
@@ -119,6 +122,8 @@ facts a wrong install gets wrong. Then install:
 | `--dsh-root DIR` / `--dsh-home DIR` | Phase 0 found a Harness outside the conventional locations, or a `DSH_HOME` other than `~/.dsh`. |
 | `--with-vision-subagent` | The human also wants *their own* agent to read images through the Harness. Touches the Harness checkout's `standard` preset. |
 | `--no-project-links` | The project should not gain `.agents/` entries (rare; for a package used only as a shell tool). |
+| `--no-agent-rule` | The project's `CLAUDE.md`/`AGENTS.md` must not receive the orchestrator rule (rare; the rule is what makes delegation automatic). |
+| `--rule-file PATH` | Inject the rule into `PATH` instead of the default `CLAUDE.md`/`AGENTS.md` candidates. Repeatable; a relative path resolves against the project. |
 | `--uninstall` | Never in a normal install. See "Uninstalling". |
 
 ### What the installer touches
@@ -129,11 +134,26 @@ facts a wrong install gets wrong. Then install:
 | `$DSH_HOME/plugins/dsh-workspace-attach/` | A **copy** of the plugin, so the GUI keeps working if the project moves or is deleted. |
 | `$DSH_HOME/profiles/web/cordis.patch.yml` | One fenced loader row pointing at that copy. |
 | `<project>/.agents/…` | Links to the bridge, the plugin, and the skill — its `SKILL.md`, both runner scripts, and its references. **A path the project already has is kept, never overwritten.** |
+| `<project>/CLAUDE.md`, `<project>/AGENTS.md` | A managed `<!-- deepseek-offload: orchestrator rule — begin/end -->` block holding [`install/templates/orchestrator-rule.md`](install/templates/orchestrator-rule.md). Symlinks are resolved, so a `CLAUDE.md` → `AGENTS.md` link is written through once and the link is left in place; the block goes after the first H1 (the top when there is none), is replaced in place on later runs, and is removed by `--uninstall`. A file containing `THE DEEPSEEK HARNESS IS THE WORKER` without the fence is **kept** — it already carries a hand-written rule. `--no-agent-rule` skips the step; `--rule-file` overrides the candidates. |
 | `<project>/.mcp.json`, `<project>/.agents/mcp_config.json` | With `--with-mcp-config`: a managed `deepseek` entry. An existing `deepseek` entry that differs **is replaced** — if it was hand-written, copy it aside first and tell the human. |
 
 Two facts about those profile files that cause most failures: they must remain a **YAML array**
 (a comments-only file is invalid YAML), and the plugin must be reachable through a **stable path** —
 which is exactly why it is copied instead of linked into the package.
+
+### Competing routes (report, do not edit)
+
+After the install, look for routes that compete with the orchestrator rule:
+
+- `.claude/agents/*.md` files whose description or prompt owns implementation work.
+- A docs roster — a list of Claude subagents and their roles — that does the same.
+- A `CLAUDE.md`/`AGENTS.md` section that still describes delegation as an optional role rather than
+  the project default, or that routes implementation work to Claude subagents.
+
+They are project-owned: **do not rewrite them.** Report them to the human, and suggest this wording:
+"implementation goes to DeepSeek, with the project role as the `--label`; Claude subagents are only
+for review and read-only analysis." The managed orchestrator-rule block states that precedence, but
+these files are what a future session reads first, and changing them is the human's call.
 
 ## Phase 3 — Verify
 
@@ -153,6 +173,7 @@ ok    model accepts images — model=deepseek-flash (declared in /…/.dsh/profi
 ok    job store writable — /…/<project>/scratch/dsh-offload/jobs
 ok    MCP config — DEEPSEEK_MCP_CONFIG unset — delegated jobs get no MCP tools
 ok    workspace grouping — plugin alive (pid 4242, 1s ago) — sessions join their project folder
+ok    orchestrator rule — /…/<project>/CLAUDE.md
 ```
 
 Interpretation:
@@ -164,6 +185,7 @@ Interpretation:
 | `model accepts images` | The pinned id is missing from the `acp` profile's model catalog, so jobs can still run but cannot read an image. Re-run `install.sh`: it rewrites the catalog row. Verify with a job that reads a PNG. |
 | `MCP config … no MCP tools` | Not an error: the child gets no MCP tools unless a job passes `--mcp-config`. Mention it, do not "fix" it. |
 | `workspace grouping` | The plugin is not loaded. Re-run `install.sh`; if the GUI was already running, reload its page. Only a GUI that is running *with* the row loaded reports alive. If you isolated `DSH_HOME` (a test install), this line fails by construction — the running GUI owns the real home. |
+| `orchestrator rule` | No project instruction file carries the managed block. Re-run `install.sh` to insert it. A hand-written rule containing `THE DEEPSEEK HARNESS IS THE WORKER` also counts as ok; an install run with `--no-agent-rule` is expected to leave this line failing. |
 
 Then confirm the install is idempotent — the second run must change nothing:
 
@@ -236,6 +258,7 @@ deepseek-offload is installed in <project>.
   plugin      $DSH_HOME/plugins/dsh-workspace-attach (copy) — grouping verified
   permission  allow | reject
   model       <id from doctor>
+  rule        <file(s)> — inserted | updated | unchanged | kept
 
 Verified: doctor all-ok; smoke job <jobId> finished and is filed under workspace "<name>".
 
@@ -285,8 +308,9 @@ Diagnose with a command before proposing a fix. Each row names the command that 
 ## Uninstalling
 
 Only on the human's explicit request. It removes the managed profile rows (restoring a valid empty
-patch file), the plugin copy, the MCP entries, and the `.agents/` links **that resolve into this
-package**. It never deletes a project file that merely shares a path.
+patch file), the plugin copy, the MCP entries, the managed orchestrator-rule block from
+`CLAUDE.md`/`AGENTS.md` (a hand-written rule is left alone), and the `.agents/` links **that resolve
+into this package**. It never deletes a project file that merely shares a path.
 
 ```sh
 .agents/deepseek-offload/install.sh --dry-run --uninstall   # show the plan first
@@ -307,6 +331,10 @@ are the human's history in the GUI, not the installer's to delete.
   `initialized` marker and will not run twice. Use `sync-workspace --all`.
 - **Never hand-write the profile rows.** Use `install.sh`: it owns the fenced blocks, and a
   hand-edited patch file that stops being a YAML array breaks GUI startup.
+- **Never hand-edit the orchestrator-rule block.** Re-run `install.sh` instead: it owns the fenced
+  block, and a hand edit inside or outside the fence is either overwritten on the next run or leaves
+  a stale rule behind. A `kept` line means the project already has its own rule; leave it and tell
+  the human.
 - **Never overwrite a project file to "fix" an install.** A `kept` line means the project has its own
   copy; leave it and tell the human.
 - **Never guess a model name.** Use an id from the list in Phase 2.
@@ -328,6 +356,7 @@ are the human's history in the GUI, not the installer's to delete.
 | `.agents/skills/deepseek-offload/SKILL.md` | Guide for the calling agent. |
 | `.agents/dsh-workspace-attach/` | Plugin that files sessions under their project folder. |
 | `install.sh` / `install/configure.mjs` | The installer. `install.sh --help` documents every flag. |
+| `install/templates/orchestrator-rule.md` | The canonical orchestrator rule body injected into the project's `CLAUDE.md`/`AGENTS.md`. |
 | `$DSH_HOME/profiles/{acp,web}/cordis.patch.yml` | Managed profile rows. |
 | `$DSH_HOME/plugins/dsh-workspace-attach/` | Installed copy of the plugin. |
 | `$DSH_HOME/workspace-attach/` | Adoption inbox: `<sessionId>.request.json` in, `<sessionId>.result.json` out. Requests queue while the GUI is closed. |
