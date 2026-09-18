@@ -75,11 +75,16 @@ same frame channel — but `session-tail.mjs` still works when no GUI is open at
 | Offload to DeepSeek (path A or B) | Keep it in your own context |
 | :--- | :--- |
 | Repo-wide audits, greps, "find every place X happens". | Anything needing *this* conversation's context or the user's intent. |
-| Reading long logs, test output, PDFs, or images (vision). | Small edits you can make in 1–2 tool calls. |
-| Drafting docs, notes, changelog prose, translations. | Decisions the user must make (architecture, licensing, priorities). |
-| Bulk mechanical refactors with a verifiable check (build/test). | Work that needs your file-edit tools on uncommitted, mid-edit state. |
-| Independent workstreams that can run in parallel (fan-out). | Secrets handling, credential rotation, production deploys. |
-| Long-running experiments (benchmarks, repeated test triage). | Git history rewrites, PR stacking, anything irreversible. |
+| Reading long logs, test output, PDFs, or images (vision). | Decisions the user must make (architecture, licensing, priorities). |
+| Small precise edits — via the blocking `deepseek_agent` tool. | Work that needs your file-edit tools on uncommitted, mid-edit state. |
+| Drafting docs, notes, changelog prose, translations. | Secrets handling, credential rotation, production deploys. |
+| Bulk mechanical refactors with a verifiable check (build/test). | Git history rewrites, PR stacking, anything irreversible. |
+| Independent workstreams that can run in parallel (fan-out). | |
+| Long-running experiments (benchmarks, repeated test triage). | |
+
+When the project's `CLAUDE.md`/`AGENTS.md` carries the managed block
+`deepseek-offload: orchestrator rule`, that rule is unconditional and takes precedence over this
+table's rule of thumb.
 
 Rule of thumb: **if the work produces more intermediate text than final text, offload it.**
 

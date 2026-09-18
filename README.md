@@ -113,6 +113,15 @@ node "$R" result <jobId>      # the final report
 See [`.agents/skills/deepseek-offload/SKILL.md`](.agents/skills/deepseek-offload/SKILL.md) for the
 full usage guide and prompt templates.
 
+## Orchestrator rule
+
+The package ships the canonical rule body that makes delegation automatic instead of something the
+human has to ask for: [`install/templates/orchestrator-rule.md`](install/templates/orchestrator-rule.md).
+It states that the calling agent is the orchestrator and the DeepSeek Harness is the worker, that
+every unit of execution is dispatched through `deepseek_agent` or the background runner, and that
+Claude subagents are used only for review or read-only analysis. `install.sh` injects that body into
+the project's `CLAUDE.md`/`AGENTS.md`, so the rule lives in the project's own instructions.
+
 ## Background jobs
 
 ```sh
