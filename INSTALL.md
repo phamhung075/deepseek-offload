@@ -153,7 +153,9 @@ After the install, look for routes that compete with the orchestrator rule:
 They are project-owned: **do not rewrite them.** Report them to the human, and suggest this wording:
 "implementation goes to DeepSeek, with the project role as the `--label`; Claude subagents are only
 for review and read-only analysis." The managed orchestrator-rule block states that precedence, but
-these files are what a future session reads first, and changing them is the human's call.
+these files are what a future session reads first, and changing them is the human's call. To have
+the project's own agent make the change, hand it
+[`install/templates/competing-routes-prompt.md`](install/templates/competing-routes-prompt.md).
 
 ## Phase 3 — Verify
 
