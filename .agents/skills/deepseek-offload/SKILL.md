@@ -70,6 +70,19 @@ Report those progress lines to the user: a released GUI cannot give them. A Harn
 foreign Session as running from its writes, and its follow stream reads the child's appends and that
 same frame channel — but `session-tail.mjs` still works when no GUI is open at all.
 
+> [!IMPORTANT]
+> **Token Economics: Never Poll or Tail in Tight Loops**
+> Do NOT repeatedly invoke `session-tail.mjs`, `status`, or `result` in tight consecutive tool loops. Each
+> orchestrator tool call and response dumps hundreds of tokens into the context window, rapidly inflating costs.
+> Instead:
+> 1. **Estimate realistic execution times**:
+>    - Rust build / link: ~1–2 minutes.
+>    - Benchmark scoring (`eval_digital.py`): ~2–3 minutes.
+>    - Full multi-increment worker run: ~5–10 minutes.
+> 2. **Set a timer to wait**: Use the orchestrator's `schedule` tool with `DurationSeconds=<estimated_seconds>`
+>    (or `wait --timeout-ms <N>`) and conclude your turn so the model sleeps until the timer fires.
+> 3. Check progress only after the timer expires, or wait for background process reactive wakeup.
+
 ## 1. When to offload, and when not to
 
 | Offload to DeepSeek (path A or B) | Keep it in your own context |
@@ -243,9 +256,14 @@ Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-conf
 `--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
-shows for it: an idle row under the project folder, never live progress. Report progress yourself
-from `scripts/session-tail.mjs`. Jobs are detached: they keep running after the launching session
-ends.
+shows for it: an idle row under the project folder, never live progress. Jobs are detached: they keep running after the launching session ends.
+
+**Token Economics Warning for Following Jobs:**
+Do NOT continuously invoke `session-tail.mjs`, `status`, or `wait` across back-to-back assistant turns. Polling every few seconds burns excessive tokens in context.
+Instead:
+- **Estimate duration**: Think through the computational cost (e.g., Rust compilation: ~1–2 min, benchmark test suite: ~2–3 min, worker implementation & refactoring: ~5–10 min).
+- **Set a timer**: Call `schedule` with `DurationSeconds=<seconds>` and end your turn to sleep until notified.
+- **Inspect**: Run `result <jobId>` or `session-tail.mjs` only after the timer fires.
 
 **Parallel fan-out:** start one job per independent workstream, then `wait` on each. Session ids
 are attributed by diffing the session list against pre-existing ids, so concurrent jobs don't
