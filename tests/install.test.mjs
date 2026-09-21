@@ -166,6 +166,7 @@ test('the project gains the skill entry point and both scripts, not just their d
     '.agents/dsh-workspace-attach',
     '.agents/skills/deepseek-offload/SKILL.md',
     '.agents/skills/deepseek-offload/scripts/dsh-offload.mjs',
+    '.agents/skills/deepseek-offload/scripts/deepseek-offload.mjs',
     '.agents/skills/deepseek-offload/scripts/session-tail.mjs',
     '.agents/skills/deepseek-offload/references',
   ])

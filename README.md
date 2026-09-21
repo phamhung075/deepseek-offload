@@ -109,9 +109,13 @@ profile is `patchReload: live`, so no restart is needed. Then start a job:
 ```sh
 R=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
 node "$R" start "<self-contained task>" --label my-job
+node "$R" start --prompt-file task.md --label safe   # or: -f task.md (avoids shell backtick expansion)
 node "$R" status <jobId>      # state, session id, workspace, follow command
 node "$R" result <jobId>      # the final report
 ```
+
+`deepseek-offload.mjs` in that `scripts/` directory is an alias symlink to `dsh-offload.mjs`, so
+either name works.
 
 See [`.agents/skills/deepseek-offload/SKILL.md`](.agents/skills/deepseek-offload/SKILL.md) for the
 full usage guide and prompt templates.
@@ -129,9 +133,10 @@ the project's `CLAUDE.md`/`AGENTS.md`, so the rule lives in the project's own in
 
 ```sh
 node "$R" doctor                        health check, including workspace grouping
-node "$R" start "<prompt>" [--cwd DIR] [--label NAME] [--mcp-config FILE]
-                           [--permission allow|reject] [--timeout-ms N]
-                           [--defer-to-off-peak] [--detach] [--json]
+node "$R" start "<prompt>" [--prompt-file FILE] [--cwd DIR] [--label NAME]
+                           [--mcp-config FILE] [--permission allow|reject]
+                           [--timeout-ms N] [--defer-to-off-peak] [--detach]
+                           [--json]
 node "$R" wait   <jobId>                print the header, then block until the job settles
 node "$R" update <jobId> "<new info>"   steer a running job
 node "$R" cancel <jobId>                stop it outright
@@ -142,7 +147,8 @@ node "$R" window                        DeepSeek peak/off-peak pricing window
 ```
 
 Prompts must be self-contained: a job gets a fresh session that cannot see your conversation and
-cannot ask you questions.
+cannot ask you questions. A prompt of `-` reads the task from stdin; `--prompt-file FILE` (`-f FILE`)
+reads it from a file, which avoids shell backtick expansion.
 
 ## Why jobs land under a project folder (and used to land in "Ungrouped")
 

@@ -192,6 +192,8 @@ node "$OFF" window                       # is DeepSeek pricing peak or off-peak 
 node "$OFF" start "<self-contained task>" --cwd "$PWD" --label audit-licensing
 node "$OFF" start "<investigation, nothing may change>" --read-only --label root-cause
 node "$OFF" start "<batch job>" --cwd "$PWD" --defer-to-off-peak --detach  # wait for half price
+node "$OFF" start --prompt-file task.md --cwd "$PWD" --label from-file     # long prompt from a file
+node "$OFF" start - --cwd "$PWD" < task.md                                 # prompt from stdin
 node "$OFF" status  <jobId>
 node "$OFF" result  <jobId>
 node "$OFF" guard   <jobId>               # did the job try to commit or push, and where did it land?
@@ -203,11 +205,28 @@ node "$OFF" sessions --cwd "$PWD"        # sessions in the shared store the GUI 
 node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the child would get
 ```
 
+> [!IMPORTANT]
+> **Pass multi-line prompts with `--prompt-file FILE` (or `-f FILE`), never as a quoted shell
+> argument.** A prompt that contains backticks or a fenced code block (`` ``` ``) is evaluated by
+> bash **before** the runner ever sees it: every backtick span is executed as command substitution
+> and replaced by its output, so the child receives a mangled prompt and the shell may run commands
+> you never intended. Write the prompt to a file and pass its path, or pipe it on stdin with `-`:
+>
+> ```sh
+> node "$OFF" start --prompt-file task.md --label safe   # or: -f task.md
+> node "$OFF" start - < task.md                          # or: no prompt argument, piped stdin
+> ```
+>
+> `--prompt-file <path>` reads the file as UTF-8 and trims it; a missing file fails with
+> `prompt file not found: <path>` (exit 1) before any job is recorded. `-` (or an empty prompt with a
+> non-interactive stdin) reads the prompt from stdin. `deepseek-offload.mjs` is an alias symlink of
+> `dsh-offload.mjs` — either name runs the identical runner.
+
 | Command | Behaviour | Exit code |
 | :--- | :--- | :--- |
 | `doctor` | Checks node, bridge, `DSH_HOME`, model patch, MCP config, job-store writability. | `0` ok, `1` fail |
 | `window` | Reports whether DeepSeek pricing is peak or off-peak right now, and when it next flips — see "Off-peak planning" below. | `0` |
-| `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. `--detach` returns instantly. `--read-only` pins the job to the Harness's read-only file policy, so it cannot modify a file; `--allow-git-write` lifts the git write guard instead, and the two are mutually exclusive. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
+| `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. The prompt comes from the positional argument, from `--prompt-file FILE` / `-f FILE`, or from stdin (`-`, or no prompt argument on a non-interactive stdin); use the file/stdin forms for anything multi-line. `--detach` returns instantly. `--read-only` pins the job to the Harness's read-only file policy, so it cannot modify a file; `--allow-git-write` lifts the git write guard instead, and the two are mutually exclusive. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
 | `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
 | `result` | Final report text. | `0` done, `1` error, `2` still running |
 | `guard` | The job's git write guard state, plus any refs a guarded push landed in the sandbox instead of the real remote. | `0` |
@@ -219,7 +238,8 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
 
 Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-config FILE`,
-`--label NAME`, `--permission allow|reject`, `--allow-git-write`, `--read-only`, `--timeout-ms N`,
+`--prompt-file FILE` / `-f FILE` (for `start`), `--label NAME`, `--permission allow|reject`,
+`--allow-git-write`, `--read-only`, `--timeout-ms N`,
 `--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
@@ -381,7 +401,7 @@ original session in the GUI.
 
 ## 10. Reference files
 
-- [.agents/skills/deepseek-offload/scripts/dsh-offload.mjs](scripts/dsh-offload.mjs) — background job runner.
+- [.agents/skills/deepseek-offload/scripts/dsh-offload.mjs](scripts/dsh-offload.mjs) — background job runner (`scripts/deepseek-offload.mjs` is an alias symlink to it).
 - [../../../INSTALL.md](../../../INSTALL.md) — the install runbook: to set this package up in a project, follow it phase by phase instead of assembling the steps from this file.
 - [references/prompt-templates.md](references/prompt-templates.md) — copy-paste job prompts.
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.

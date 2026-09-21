@@ -20,6 +20,8 @@
  *   node dsh-offload.mjs doctor
  *   node dsh-offload.mjs window [--tz IANA_NAME]
  *   node dsh-offload.mjs start "<self-contained prompt>" [--cwd DIR] [--label NAME] [--defer-to-off-peak]
+ *   node dsh-offload.mjs start --prompt-file FILE|-f FILE   # read the prompt from a file
+ *   node dsh-offload.mjs start -                          # read the prompt from stdin
  *   node dsh-offload.mjs status <jobId>
  *   node dsh-offload.mjs result <jobId>
  *   node dsh-offload.mjs wait   <jobId> [--timeout-ms N]
@@ -264,6 +266,9 @@ function print(value, asJson) {
 function parseArgs(argv) {
   const positional = []
   const flags = {}
+  // Short flags stay separate from long ones: `-f` is stored as `f` (never
+  // merged with the long form), and a lone `-` is kept as a positional token
+  // because it is the stdin sentinel, not a flag.
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]
     if (token.startsWith('--')) {
@@ -271,6 +276,16 @@ function parseArgs(argv) {
       if (inline !== undefined) {
         flags[name] = inline
       } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
+        flags[name] = argv[i + 1]
+        i++
+      } else {
+        flags[name] = true
+      }
+    } else if (token.startsWith('-') && token !== '-') {
+      const [name, inline] = token.slice(1).split('=')
+      if (inline !== undefined) {
+        flags[name] = inline
+      } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('-')) {
         flags[name] = argv[i + 1]
         i++
       } else {
@@ -995,9 +1010,23 @@ function describeJob(job, { full = false } = {}) {
 
 async function commandStart(positional, flags) {
   ensureDirs()
-  const prompt = positional.join(' ').trim()
+  const promptFile = typeof flags['prompt-file'] === 'string'
+    ? flags['prompt-file']
+    : typeof flags.f === 'string' ? flags.f : null
+  let prompt = positional.join(' ').trim()
+  if (promptFile !== null) {
+    if (!fs.existsSync(promptFile)) fail(`prompt file not found: ${promptFile}`)
+    prompt = fs.readFileSync(promptFile, 'utf8').trim()
+  }
+  // `-` and an empty prompt on a non-interactive stdin both mean "read it from
+  // the pipe". The stdin read is what keeps a multi-line prompt out of the
+  // shell, where backticks would be evaluated as subcommands before the runner
+  // ever sees the text.
+  if (prompt === '-' || (prompt === '' && !process.stdin.isTTY)) {
+    prompt = fs.readFileSync(0, 'utf8').trim()
+  }
   const cwd = typeof flags.cwd === 'string' ? flags.cwd : DEFAULT_CWD
-  if (prompt === '') fail('start requires a prompt: dsh-offload start "<self-contained task>"')
+  if (prompt === '') fail('start requires a prompt: dsh-offload start "<self-contained task>" or --prompt-file <path>')
   if (flags['read-only'] === true && flags['allow-git-write'] === true) {
     fail('--read-only and --allow-git-write contradict each other: read-only denies the file writes a commit needs')
   }
@@ -1759,6 +1788,12 @@ function usage() {
   doctor                       verify bridge, DSH_HOME, acp model, MCP config and job store
   window [--tz IANA] [--json]  DeepSeek peak/off-peak status now, and when it next flips
   start "<prompt>" [flags]     launch a background job; prints job id + session id
+                                 --prompt-file FILE, -f FILE   read the prompt from FILE
+                                   (use this for multi-line prompts: backticks and
+                                   code blocks in a quoted argument are evaluated by
+                                   the shell as command substitution)
+                                 -   read the prompt from stdin (or pipe it: no
+                                   prompt argument and stdin is not a TTY)
                                  --cwd DIR (absolute, default ${DEFAULT_CWD})
                                  --mcp-config FILE (Claude .mcp.json / Gemini mcp_config.json)
                                  --label NAME  --permission allow|reject

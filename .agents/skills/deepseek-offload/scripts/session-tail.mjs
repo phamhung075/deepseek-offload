@@ -28,7 +28,8 @@
  * record stops reading `running`.
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
-import { createZstdDecompress } from 'node:zlib'
+import * as zlib from 'node:zlib'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -163,6 +164,56 @@ function readAppended(path, offset) {
 }
 
 /**
+ * Calculate the byte length of one Zstandard frame starting at `offset`.
+ * Returns null if the frame header or data is incomplete (torn trailing frame).
+ */
+function readFrameSize(buf, offset) {
+  if (offset + 4 > buf.length) return null
+  const magic = buf.readUInt32LE(offset)
+  if (magic >= 0x184D2A50 && magic <= 0x184D2A5F) {
+    if (offset + 8 > buf.length) return null
+    return 8 + buf.readUInt32LE(offset + 4)
+  }
+  if (magic !== 0xFD2FB528) return null
+  let pos = offset + 4
+  if (pos >= buf.length) return null
+  const fhd = buf[pos++]
+  const singleSegment = (fhd & 0x20) !== 0
+  const fcsFlag = (fhd >> 6) & 0x03
+  const dictFlag = fhd & 0x03
+  const checksumFlag = (fhd & 0x04) !== 0
+
+  if (!singleSegment) pos += 1
+  const dictSizes = [0, 1, 2, 4]
+  pos += dictSizes[dictFlag]
+  const fcsSizes = singleSegment ? [1, 2, 4, 8] : [0, 2, 4, 8]
+  pos += fcsSizes[fcsFlag]
+
+  if (pos > buf.length) return null
+
+  while (true) {
+    if (pos + 3 > buf.length) return null
+    const b0 = buf[pos]
+    const b1 = buf[pos + 1]
+    const b2 = buf[pos + 2]
+    pos += 3
+    const lastBlock = (b0 & 1) === 1
+    const blockType = (b0 >> 1) & 3
+    const blockSize = (b0 >> 3) | (b1 << 5) | (b2 << 13)
+    if (blockType === 3) return null
+    const dataSize = (blockType === 1) ? 1 : blockSize
+    pos += dataSize
+    if (pos > buf.length) return null
+    if (lastBlock) break
+  }
+  if (checksumFlag) {
+    pos += 4
+    if (pos > buf.length) return null
+  }
+  return pos - offset
+}
+
+/**
  * Decode complete frames at or after `offset`.
  * @returns parsed records plus the offset of the next frame boundary; a torn
  * trailing frame leaves the offset where it is, so the next poll retries it.
@@ -170,29 +221,55 @@ function readAppended(path, offset) {
 async function decodeFrames(buffer, offset) {
   const records = []
   let cursor = offset
-  for (;;) {
-    if (cursor >= buffer.length) return { records, end: cursor }
-    const stream = createZstdDecompress()
-    const chunks = []
-    const frame = await new Promise(resolve => {
-      stream.on('data', chunk => chunks.push(chunk))
-      stream.on('error', () => resolve({ ok: false, used: 0 }))
-      stream.on('end', () => resolve({ ok: true, used: stream.bytesWritten }))
-      stream.end(buffer.subarray(cursor))
-    })
-    if (!frame.ok || frame.used <= 0) return { records, end: cursor }
-    const text = Buffer.concat(chunks).toString('utf8')
-    if (!text.endsWith('\n')) return { records, end: cursor }
-    for (const line of text.split('\n')) {
-      if (line === '') continue
-      try {
-        records.push(JSON.parse(line))
-      } catch {
-        // A frame is written atomically; unparsable lines mean a newer writer format.
+
+  if (typeof zlib.createZstdDecompress === 'function') {
+    for (;;) {
+      if (cursor >= buffer.length) return { records, end: cursor }
+      const stream = zlib.createZstdDecompress()
+      const chunks = []
+      const frame = await new Promise(resolve => {
+        stream.on('data', chunk => chunks.push(chunk))
+        stream.on('error', () => resolve({ ok: false, used: 0 }))
+        stream.on('end', () => resolve({ ok: true, used: stream.bytesWritten }))
+        stream.end(buffer.subarray(cursor))
+      })
+      if (!frame.ok || frame.used <= 0) return { records, end: cursor }
+      const text = Buffer.concat(chunks).toString('utf8')
+      if (!text.endsWith('\n')) return { records, end: cursor }
+      for (const line of text.split('\n')) {
+        if (line === '') continue
+        try {
+          records.push(JSON.parse(line))
+        } catch {
+          // A frame is written atomically; unparsable lines mean a newer writer format.
+        }
       }
+      cursor += frame.used
     }
-    cursor += frame.used
   }
+
+  // Fallback for Node < 21.7 where node:zlib does not provide createZstdDecompress
+  let end = cursor
+  while (end < buffer.length) {
+    const size = readFrameSize(buffer, end)
+    if (!size || end + size > buffer.length) break
+    end += size
+  }
+  if (end === cursor) return { records, end: cursor }
+
+  const chunk = buffer.subarray(cursor, end)
+  const result = spawnSync('zstd', ['-dc'], { input: chunk, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 })
+  if (result.status !== 0 || !result.stdout) return { records, end: cursor }
+
+  for (const line of result.stdout.split('\n')) {
+    if (line === '') continue
+    try {
+      records.push(JSON.parse(line))
+    } catch {
+      // A frame is written atomically; unparsable lines mean a newer writer format.
+    }
+  }
+  return { records, end }
 }
 
 /** Decode complete plaintext rows at or after `offset` from an uncompressed log. */

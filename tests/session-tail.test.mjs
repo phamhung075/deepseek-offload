@@ -13,7 +13,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { zstdCompressSync } from 'node:zlib'
+import * as zlib from 'node:zlib'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const tailer = join(here, '..', '.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs')
@@ -33,7 +33,13 @@ const record = (time, command) => ({
   time,
   data: { name: 'bash', arguments: JSON.stringify({ command }) },
 })
-const frame = records => zstdCompressSync(Buffer.from(records.map(entry => `${JSON.stringify(entry)}\n`).join(''), 'utf8'))
+const frame = records => {
+  const bytes = Buffer.from(records.map(entry => `${JSON.stringify(entry)}\n`).join(''), 'utf8')
+  if (typeof zlib.zstdCompressSync === 'function') {
+    return zlib.zstdCompressSync(bytes)
+  }
+  return execFileSync('zstd', ['-q'], { input: bytes })
+}
 const rows = records => records.map(entry => `${JSON.stringify(entry)}\n`).join('')
 /** One live-channel line: a text-delta frame as the persistence provider publishes it. */
 const liveText = (seq, time, text, attemptId = 'attempt-1') => `${JSON.stringify({

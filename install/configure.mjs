@@ -1128,6 +1128,7 @@ function projectLinks(project) {
     // its own `SKILL.md` still gains the rest.
     entry('SKILL.md'),
     entry(path.join('scripts', 'dsh-offload.mjs')),
+    entry(path.join('scripts', 'deepseek-offload.mjs')),
     entry(path.join('scripts', 'session-tail.mjs')),
     entry('references'),
   ]
