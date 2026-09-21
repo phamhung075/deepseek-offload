@@ -491,15 +491,15 @@ function ensureAcpPin(file) {
 }
 
 /**
- * The provider catalog entries the `acp` profile needs.
+ * The single provider catalog entry the `acp` profile needs.
  *
- * A profile patch **replaces** the provider's own model catalog, and a model
- * absent from the catalog resolves as text-only, so an image job under it is
- * refused with `model "…" does not declare image input`. The pinned id has to be
- * listed for that reason, and the ids a later `--model` might switch to are
- * listed with it, so the catalog never silently narrows.
+ * A profile patch **replaces** the provider's own model catalog, so the catalog
+ * lists only the pinned id: the id must be present for its image capability to
+ * resolve (an absent model resolves as text-only, and an image job under it is
+ * refused with `model "…" does not declare image input`), and no other model is
+ * offered.
  * @param model - the pinned model id.
- * @returns catalog entries, pin first.
+ * @returns exactly one catalog entry, the pinned id.
  */
 function acpCatalogRows(model) {
   const known = [
@@ -508,12 +508,11 @@ function acpCatalogRows(model) {
     ['deepseek-v4-flash', 'DeepSeek-V4-Flash'],
     ['deepseek-v4-flash-vision-exp', 'DeepSeek-V4-Flash-Vision-Exp'],
   ]
-  const ordered = [[model, known.find(([id]) => id === model)?.[1] ?? model], ...known.filter(([id]) => id !== model)]
-  return ordered.map(([id, name]) => ({
-    id,
-    name,
-    inputModalities: VISION_MODEL_IDS.has(id) ? ['text', 'image'] : ['text'],
-  }))
+  return [{
+    id: model,
+    name: known.find(([id]) => id === model)?.[1] ?? model,
+    inputModalities: VISION_MODEL_IDS.has(model) ? ['text', 'image'] : ['text'],
+  }]
 }
 
 /**

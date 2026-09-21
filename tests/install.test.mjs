@@ -40,22 +40,19 @@ function seed(file, content = '// seeded\n') {
   writeFileSync(file, content)
 }
 
-test('the catalog declares image input only for the ids that accept it', () => {
+test('the catalog lists only the pinned id, with its display name and image input', () => {
   const rows = acpCatalogRows('deepseek-flash')
-  assert.equal(rows[0].id, 'deepseek-flash', 'the pinned id comes first')
-  assert.deepEqual(rows[0].inputModalities, ['text', 'image'])
+  assert.equal(rows.length, 1, 'no other model is offered')
+  assert.equal(rows[0].id, 'deepseek-flash')
   assert.equal(rows[0].name, 'DeepSeek-V4.1-Flash', 'the pinned id keeps its display name')
-  const byId = Object.fromEntries(rows.map(row => [row.id, row.inputModalities]))
-  assert.deepEqual(byId['deepseek-v4-pro'], ['text'], 'pro takes no images')
-  assert.deepEqual(byId['deepseek-v4-flash-vision-exp'], ['text', 'image'])
-  assert.equal(new Set(rows.map(row => row.id)).size, rows.length, 'no duplicate ids')
+  assert.deepEqual(rows[0].inputModalities, ['text', 'image'])
 })
 
-test('an unknown pin is still listed, and text-only', () => {
+test('an unknown pin is listed alone and text-only', () => {
   const rows = acpCatalogRows('deepseek-v5-experimental')
+  assert.equal(rows.length, 1, 'only the pinned id is listed')
   assert.equal(rows[0].id, 'deepseek-v5-experimental')
   assert.deepEqual(rows[0].inputModalities, ['text'], 'only known ids are declared image-capable')
-  assert.equal(rows.length, 5, 'the known ids stay available behind the pin')
 })
 
 test('hasRows sees through comments and blank lines', () => {
