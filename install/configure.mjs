@@ -115,10 +115,10 @@ function main() {
   const acpPatch = path.join(home, 'profiles', 'acp', 'cordis.patch.yml')
   const webPatch = path.join(home, 'profiles', 'web', 'cordis.patch.yml')
   const pluginDir = path.join(home, 'plugins', 'dsh-workspace-attach')
-  const mcpFiles = [path.join(project, '.mcp.json'), path.join(project, '.agents', 'mcp_config.json')]
+  const mcpFiles = mcpTargets(project)
 
   if (args.uninstall) {
-    uninstall({ acpPatch, webPatch, pluginDir, mcpFiles, project })
+    uninstall({ acpPatch, webPatch, pluginDir, mcpFiles: mcpFiles.map(t => t.file), project })
     return
   }
 
@@ -136,6 +136,7 @@ function main() {
     log('note       project entries untouched (--no-project-links)')
   } else {
     wireProject(project)
+    wireGeminiSkills()
   }
 
   // The orchestrator rule is what makes delegation automatic; it is the one
@@ -148,7 +149,7 @@ function main() {
   }
 
   if (args['with-mcp-config']) {
-    for (const file of mcpFiles) registerMcpServer(file, project)
+    for (const { file, isWindowsHost } of mcpFiles) registerMcpServer(file, project, isWindowsHost)
   } else {
     log('note       project MCP configs untouched — add --with-mcp-config to register the bridge')
   }
@@ -699,7 +700,7 @@ function removeRuleBlock(source) {
 function orchestratorRuleFiles(project, ruleFiles) {
   const candidates = ruleFiles !== undefined && ruleFiles.length > 0
     ? ruleFiles.map(file => (path.isAbsolute(file) ? file : path.join(project, file)))
-    : [path.join(project, 'CLAUDE.md'), path.join(project, 'AGENTS.md')]
+    : [path.join(project, 'CLAUDE.md'), path.join(project, 'AGENTS.md'), path.join(project, 'GEMINI.md')]
   const files = []
   const seen = new Set()
   for (const candidate of candidates) {
@@ -868,8 +869,89 @@ function permissionPolicy() {
   return args.permission === 'reject' ? 'reject' : 'allow'
 }
 
+/** Resolve a Node.js binary >= 22 (required by the Harness). */
+function resolveNodeBinary() {
+  if (process.env.DSH_NODE && fs.existsSync(process.env.DSH_NODE)) return process.env.DSH_NODE
+  const major = parseInt(process.versions.node.split('.')[0], 10)
+  if (major >= 22) return process.execPath
+  const nvmBase = path.join(os.homedir(), '.nvm', 'versions', 'node')
+  if (fs.existsSync(nvmBase)) {
+    try {
+      const versions = fs.readdirSync(nvmBase).filter(v => /^v(2[2-9]|[3-9]\d)/.test(v)).sort().reverse()
+      if (versions.length > 0) {
+        const candidate = path.join(nvmBase, versions[0], 'bin', 'node')
+        if (fs.existsSync(candidate)) return candidate
+      }
+    } catch {}
+  }
+  return process.execPath
+}
+
+/** All candidate MCP configuration files (Claude Code, Gemini project & global, Windows WSL). */
+function mcpTargets(project) {
+  const targets = [
+    { file: path.join(project, '.mcp.json'), isWindowsHost: false },
+    { file: path.join(project, '.agents', 'mcp_config.json'), isWindowsHost: false },
+  ]
+  const userGemini = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json')
+  if (fs.existsSync(path.dirname(userGemini))) {
+    targets.push({ file: userGemini, isWindowsHost: false })
+  }
+  if (process.platform === 'linux' && fs.existsSync('/mnt/c/Users')) {
+    try {
+      for (const user of fs.readdirSync('/mnt/c/Users')) {
+        const winGemini = path.join('/mnt/c/Users', user, '.gemini', 'config', 'mcp_config.json')
+        if (fs.existsSync(path.dirname(winGemini))) {
+          targets.push({ file: winGemini, isWindowsHost: true })
+        }
+      }
+    } catch {}
+  }
+  return targets
+}
+
+/** Wire the deepseek-offload skill into Gemini/Antigravity global skills directories if present. */
+function wireGeminiSkills() {
+  const skillSource = path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload')
+  const geminiRoots = []
+  const userGemini = path.join(os.homedir(), '.gemini', 'config', 'skills')
+  if (fs.existsSync(path.dirname(userGemini))) geminiRoots.push({ path: userGemini, isWindows: false })
+  if (process.platform === 'linux' && fs.existsSync('/mnt/c/Users')) {
+    try {
+      for (const user of fs.readdirSync('/mnt/c/Users')) {
+        const winGemini = path.join('/mnt/c/Users', user, '.gemini', 'config', 'skills')
+        if (fs.existsSync(path.dirname(winGemini))) geminiRoots.push({ path: winGemini, isWindows: true })
+      }
+    } catch {}
+  }
+  for (const root of geminiRoots) {
+    const dest = path.join(root.path, 'deepseek-offload')
+    if (fs.existsSync(dest)) {
+      log(`unchanged  ${dest} (gemini skill)`)
+      continue
+    }
+    if (args['dry-run']) {
+      log(`would install gemini skill to ${dest}`)
+      continue
+    }
+    fs.mkdirSync(root.path, { recursive: true })
+    if (root.isWindows) {
+      fs.cpSync(skillSource, dest, { recursive: true })
+      log(`installed  ${dest} (copy for windows gemini)`)
+    } else {
+      try {
+        fs.symlinkSync(skillSource, dest, 'dir')
+        log(`linked     ${dest} -> ${skillSource}`)
+      } catch {
+        fs.cpSync(skillSource, dest, { recursive: true })
+        log(`installed  ${dest} (copy for gemini)`)
+      }
+    }
+  }
+}
+
 /** Register the bridge as a stdio MCP server in one agent config file. */
-function registerMcpServer(file, project) {
+function registerMcpServer(file, project, isWindowsHost = false) {
   let config = {}
   if (fs.existsSync(file)) {
     try {
@@ -879,14 +961,37 @@ function registerMcpServer(file, project) {
       return
     }
   }
-  const entry = {
-    command: 'node',
-    args: [BRIDGE],
-    env: {
-      DEEPSEEK_MCP_DEFAULT_CWD: project,
-      DEEPSEEK_WORKSPACE_ATTACH: '1',
-      DEEPSEEK_MCP_PERMISSION: permissionPolicy(),
-    },
+  let entry
+  if (isWindowsHost) {
+    const distro = process.env.WSL_DISTRO_NAME || 'Ubuntu'
+    const nodeBin = resolveNodeBinary()
+    entry = {
+      command: 'wsl.exe',
+      args: [
+        '-d',
+        distro,
+        '--cd',
+        project,
+        '--',
+        nodeBin,
+        BRIDGE,
+      ],
+      env: {
+        DEEPSEEK_MCP_DEFAULT_CWD: project,
+        DEEPSEEK_WORKSPACE_ATTACH: '1',
+        DEEPSEEK_MCP_PERMISSION: permissionPolicy(),
+      },
+    }
+  } else {
+    entry = {
+      command: 'node',
+      args: [BRIDGE],
+      env: {
+        DEEPSEEK_MCP_DEFAULT_CWD: project,
+        DEEPSEEK_WORKSPACE_ATTACH: '1',
+        DEEPSEEK_MCP_PERMISSION: permissionPolicy(),
+      },
+    }
   }
   const servers = config.mcpServers ?? {}
   if (JSON.stringify(servers.deepseek) === JSON.stringify(entry)) {

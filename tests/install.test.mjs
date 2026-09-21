@@ -316,3 +316,19 @@ test('an explicit rule file replaces the default candidates', () => {
   assert.equal(existsSync(target), true)
   assert.equal(existsSync(join(project, 'CLAUDE.md')), false)
 })
+
+test('a project with an existing GEMINI.md gains the orchestrator rule', () => {
+  const project = scratch('rule-gemini')
+  const geminiFile = join(project, 'GEMINI.md')
+  seed(geminiFile, '# Gemini Project\n\nkeep me\n')
+
+  const results = applyOrchestratorRule(project, {})
+
+  assert.equal(results.length, 1)
+  assert.equal(results[0].file, geminiFile)
+  assert.equal(results[0].status, 'inserted')
+  const text = readFileSync(geminiFile, 'utf8')
+  assert.match(text, /keep me/)
+  assert.ok(text.includes(RULE_BEGIN))
+})
+

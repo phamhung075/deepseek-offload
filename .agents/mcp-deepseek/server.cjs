@@ -109,6 +109,27 @@ function resolveDshRoot() {
 }
 
 /**
+ * Resolve a Node.js binary >= 22 (required for Promise.withResolvers in Harness).
+ * @returns path to node executable.
+ */
+function resolveNodeBinary() {
+  if (process.env.DSH_NODE && fs.existsSync(process.env.DSH_NODE)) return process.env.DSH_NODE
+  const major = parseInt(process.versions.node.split('.')[0], 10)
+  if (major >= 22) return process.execPath
+  const nvmBase = path.join(os.homedir(), '.nvm', 'versions', 'node')
+  if (fs.existsSync(nvmBase)) {
+    try {
+      const versions = fs.readdirSync(nvmBase).filter(v => /^v(2[2-9]|[3-9]\d)/.test(v)).sort().reverse()
+      if (versions.length > 0) {
+        const candidate = path.join(nvmBase, versions[0], 'bin', 'node')
+        if (fs.existsSync(candidate)) return candidate
+      }
+    } catch {}
+  }
+  return process.execPath
+}
+
+/**
  * How to start one ACP session: an installed `dsh` when there is one, otherwise
  * a source checkout driven through its own launcher — a development checkout
  * resolves its profiles and plugins only through that launcher.
@@ -121,8 +142,9 @@ function resolveDshLaunch() {
   }
   const onPath = whichSync('dsh')
   if (onPath !== null) return { command: onPath, args: ['--profile', 'acp'], cwd: process.cwd() }
+  const nodeBin = resolveNodeBinary()
   return {
-    command: process.execPath,
+    command: nodeBin,
     args: ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', '--profile', 'acp'],
     cwd: DSH_ROOT,
   }
@@ -543,11 +565,13 @@ class AcpClient {
     // environment default, so a profile that pins sandbox-policy cannot win.
     const readOnlyPatch = readOnlyRequested() ? ensureReadOnlyPatch() : null
     const args = readOnlyPatch === null ? launch.args : [...launch.args, '--patch', readOnlyPatch]
+    const nodeDir = path.dirname(launch.command)
+    const envPath = nodeDir && nodeDir !== '.' ? `${nodeDir}:${process.env.PATH || ''}` : process.env.PATH
     this.child = spawn(launch.command, args, {
       cwd: launch.cwd,
       // `options.env` carries the git write guard; it merges last so a job can
       // never inherit a caller's GIT_CONFIG_GLOBAL in place of the guard.
-      env: { ...process.env, DSH_HOME, ...options.env },
+      env: { ...process.env, PATH: envPath, DSH_HOME, ...options.env },
       stdio: ['pipe', 'pipe', 'inherit'],
     })
 
