@@ -83,6 +83,34 @@ same frame channel — but `session-tail.mjs` still works when no GUI is open at
 >    (or `wait --timeout-ms <N>`) and conclude your turn so the model sleeps until the timer fires.
 > 3. Check progress only after the timer expires, or wait for background process reactive wakeup.
 
+### Push-back instead of polling (Claude Code): `run_in_background`
+
+Claude Code's own `Bash` tool has a `run_in_background: true` mode: it detaches the command and
+**automatically re-invokes the calling session the moment that command's process exits** — no
+manual polling, no tight loop, and no need for the user to ask "is it done yet." When the caller
+genuinely has nothing else to do while a job runs (the common case for a single-job dispatch with
+no parallel workstream), prefer this over both tight-loop `status`/`result` polling and a foreground
+blocking call:
+
+```sh
+# from Claude Code's Bash tool, with run_in_background: true
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId> --timeout-ms 1800000
+```
+
+`wait` already polls internally at a sane interval and blocks until the job settles, so wrapping it
+in a backgrounded shell exec turns that one blocking call into a real completion callback: the shell
+process (not the whole session) blocks on it, control returns immediately after dispatch, and the
+harness delivers the finished `wait` output back to the session unprompted when it exits.
+
+This is **Claude-Code-specific** — the `run_in_background` re-invoke mechanism is a Claude Code
+harness feature, not something the DeepSeek Harness or the MCP bridge itself provides. Other MCP
+clients following this skill (Gemini, Codex) should keep using the non-blocking `start` + periodic
+`result` pattern above, since they have no equivalent callback.
+
+Still prefer plain fire-and-forget `start` (no `wait` at all) when there **is** other orchestrator
+work to do meanwhile — see "Non-blocking dispatch" in the project `AGENTS.md` §7. Reach for the
+backgrounded `wait` only when the next useful thing really is "be told when this finishes."
+
 ## 1. When to offload, and when not to
 
 | Offload to DeepSeek (path A or B) | Keep it in your own context |
