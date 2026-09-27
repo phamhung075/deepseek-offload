@@ -7,8 +7,10 @@
  *
  * - `jev_check_claims` takes `{claims:[{claim, path, line}], repo?}` and reads
  *   the ±6 working-tree lines at each cited path itself: the caller never
- *   supplies evidence text. Each claim gets the measured `claim_support`
- *   question and a verdict at the 0.3 threshold.
+ *   supplies evidence text. It imports the one reader and judge from
+ *   `scripts/jev/claims.mjs` and the measured `claim_support` question and 0.3
+ *   threshold from `scripts/jev/questions.mjs`, so the CLI and the server ask
+ *   the same question of the same lines.
  * - `jev_check_scope` takes `{work_order, repo?, base?}` and reuses `jev review`
  *   (no duplicated detectors) over `base..HEAD` plus untracked files, returning
  *   the flagged groups and the look-here hunks.
@@ -29,20 +31,12 @@ const { pathToFileURL } = require('node:url')
 const SERVER_NAME = 'jev-mcp'
 const SERVER_VERSION = '0.1.0'
 
-/** How many lines on each side of a cited line `jev_check_claims` reads. */
-const EVIDENCE_RADIUS = 6
-
-/** A claim at or above this probability of support is called supported. */
-const CLAIM_SUPPORT_THRESHOLD = 0.3
-
-/** Bounds on the inputs the server accepts, mirroring the measured shapes. */
-const CLAIM_CHARS = 1000
-const EVIDENCE_CHARS = 2000
-
 const SERVER_DIR = __dirname
 const QUESTIONS_PATH = path.join(SERVER_DIR, '..', 'skills', 'deepseek-offload', 'scripts', 'jev', 'questions.mjs')
 const CLIENT_PATH = path.join(SERVER_DIR, '..', 'skills', 'deepseek-offload', 'scripts', 'jev', 'client.mjs')
 const REVIEW_PATH = path.join(SERVER_DIR, '..', 'skills', 'deepseek-offload', 'scripts', 'jev', 'review.mjs')
+// The claim question and its evidence reader live in claims.mjs, not here.
+const CLAIMS_PATH = path.join(SERVER_DIR, '..', 'skills', 'deepseek-offload', 'scripts', 'jev', 'claims.mjs')
 
 const DISABLED_TEXT = 'Jev disabled — set TYPESAFE_API_KEY (or TYPESAFE_AI_API) to enable the self-check. Nothing was checked.'
 
@@ -129,30 +123,23 @@ async function loadClient() {
   return clientModule
 }
 
+/**
+ * Load the shared claim reader/judge once. `jev_check_claims` imports claims.mjs
+ * rather than re-reading evidence or re-asking the question itself.
+ */
+let claimsModule = null
+async function loadClaims() {
+  claimsModule = claimsModule ?? await import(pathToFileURL(CLAIMS_PATH).href)
+  return claimsModule
+}
+
 /** A one-line reason from an error. */
 const reason = (error) => (error && error.message ? error.message : String(error))
 
 /**
- * Read ±EVIDENCE_RADIUS numbered lines around `line` from the working tree.
- * @returns `{path, lines}` or throws when the file cannot be read.
- */
-function readEvidence(repo, claim) {
-  const resolved = path.isAbsolute(claim.path) ? claim.path : path.resolve(repo, claim.path)
-  const text = fs.readFileSync(resolved, 'utf8')
-  const all = text.split('\n')
-  const line = Number.isSafeInteger(claim.line) && claim.line > 0 ? claim.line : 1
-  const low = Math.max(1, line - EVIDENCE_RADIUS)
-  const high = Math.min(all.length, line + EVIDENCE_RADIUS)
-  const lines = []
-  for (let number = low; number <= high; number++) lines.push(`${number}: ${all[number - 1]}`)
-  return { path: claim.path, lines: lines.join('\n') }
-}
-
-const trim = (value, chars) => (value.length > chars ? value.slice(0, chars) : value)
-
-/**
- * Check a list of claims. The server reads the evidence; caller-supplied
- * `evidence` fields are ignored.
+ * Check a list of claims against the working tree. The server reads the
+ * evidence through claims.mjs and judges it with the one measured question;
+ * caller-supplied `evidence` fields are ignored.
  * @returns the per-claim results.
  */
 async function checkClaims(args) {
@@ -161,8 +148,8 @@ async function checkClaims(args) {
     return { results: [], note: 'No claims were given.' }
   }
   const repo = typeof args.repo === 'string' && args.repo !== '' ? args.repo : process.cwd()
-  const { callJev } = await loadClient()
-  const { CLAIM_SUPPORT_ID, CLAIM_SUPPORT_QUESTION } = await loadQuestions()
+  const { readEvidence, judgeClaim } = await loadClaims()
+  const { CLAIM_SUPPORT_THRESHOLD } = await loadQuestions()
 
   const results = []
   for (const raw of claims) {
@@ -177,22 +164,17 @@ async function checkClaims(args) {
     }
     let evidence
     try {
-      evidence = readEvidence(repo, claim)
+      evidence = readEvidence(repo, { worktree: true }, claim.path, claim.line)
     } catch (error) {
       results.push({ ...claim, supported: null, verdict: `unreadable evidence: ${reason(error)}` })
       continue
     }
     try {
-      const { json } = await callJev({
-        state: { claim: trim(claim.claim, CLAIM_CHARS), evidence: { path: evidence.path, lines: trim(evidence.lines, EVIDENCE_CHARS) } },
-        questions: { [CLAIM_SUPPORT_ID]: CLAIM_SUPPORT_QUESTION },
-      })
-      const supported = json.answers?.[CLAIM_SUPPORT_ID]?.noul
-      const value = typeof supported === 'number' ? supported : null
+      const { supported } = await judgeClaim(claim.claim, evidence)
       results.push({
         ...claim,
-        supported: value,
-        verdict: value === null ? 'no answer' : (value >= CLAIM_SUPPORT_THRESHOLD ? 'supported' : 'unsupported'),
+        supported,
+        verdict: supported === null ? 'no answer' : (supported >= CLAIM_SUPPORT_THRESHOLD ? 'supported' : 'unsupported'),
       })
     } catch (error) {
       results.push({ ...claim, supported: null, verdict: `Jev error: ${reason(error)}` })

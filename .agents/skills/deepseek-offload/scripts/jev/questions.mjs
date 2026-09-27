@@ -110,10 +110,12 @@ export const LINT_QUESTIONS = {
 
 /**
  * Claim check: does the evidence at a cited `path:line` actually say what the
- * report claims? Instructions and criteria are copied verbatim from the
- * known-answer evaluation (2026-09-27: AUC 0.950, precision 0.905 / recall
- * 0.826 at threshold 0.3). The question id the evaluation answered under is
- * `supported`.
+ * report claims? Instructions and criteria are byte-identical to the
+ * `claim_support` judgment in `scratch/jev-eval/questions_v2.json`, the one
+ * measured home for this wording (2026-09-27: AUC 0.950, precision 0.905 /
+ * recall 0.826 at threshold 0.3). `jev claims` and the `mcp-jev` self-check
+ * server both read the id, wording and threshold from here. The question id the
+ * evaluation answered under is `supported`.
  */
 export const CLAIM_SUPPORTED_ID = 'supported'
 
@@ -126,6 +128,9 @@ export const CLAIM_SUPPORTED_QUESTION = {
     false: 'The evidence lines do not contain what the claim says about them.',
   },
 }
+
+/** The measured support threshold: a claim scored below this is unsupported. */
+export const CLAIM_SUPPORT_THRESHOLD = 0.3
 
 /**
  * Failure triage fallback for errors no code rule matched. UNVALIDATED: no
@@ -207,23 +212,6 @@ export const CONTRADICTS_QUESTION = {
   criteria: {
     true: 'The two findings cannot both be true.',
     false: 'The two findings can both be true.',
-  },
-}
-
-/**
- * `claim_support`, verbatim from the known-answer evaluation, 2026-09-27. The
- * evaluation measured the judgment against the ±6 numbered lines at a claim's
- * cited path: AUC 0.95, and at a threshold of 0.3 precision 0.905 / recall 0.826
- * / accuracy 0.870. `jev_check_claims` reads those lines itself and flags a
- * claim when `supported < 0.3`.
- */
-export const CLAIM_SUPPORT_ID = 'supported'
-export const CLAIM_SUPPORT_QUESTION = {
-  type: 'noul',
-  instructions: 'Do the lines in `evidence` show what `claim` says about them?',
-  criteria: {
-    true: 'The evidence lines contain what the claim says about them.',
-    false: 'The evidence lines do not contain what the claim says about them.',
   },
 }
 

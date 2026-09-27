@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { callJev, isEnabled, DISABLED_LINE, pool, CONCURRENCY } from './client.mjs'
-import { CLAIM_SUPPORTED_ID, CLAIM_SUPPORTED_QUESTION } from './questions.mjs'
+import { CLAIM_SUPPORTED_ID, CLAIM_SUPPORTED_QUESTION, CLAIM_SUPPORT_THRESHOLD } from './questions.mjs'
 import { citeRegex } from './paths.mjs'
 import { readResultText } from './job-result.mjs'
 
@@ -28,9 +28,6 @@ export const EVIDENCE_RADIUS = 6
 /** Truncation bounds from the evaluation's state shape. */
 export const CLAIM_TEXT_MAX = 1000
 export const EVIDENCE_CHARS_MAX = 2000
-
-/** Flag a claim unsupported when `supported` is below this (measured). */
-export const SUPPORTED_THRESHOLD = 0.3
 
 export const EXIT_CLAIMS_OK = 0
 export const EXIT_CLAIMS_ERROR = 1
@@ -85,12 +82,23 @@ export function extractClaims(text) {
   return claims
 }
 
-/** Read ±`radius` numbered lines at `rev:citedPath`; throws when unreadable. */
-export function readEvidence(repo, rev, citedPath, line, radius = EVIDENCE_RADIUS) {
-  const out = execFileSync('git', ['-C', repo, 'show', `${rev}:${citedPath}`], {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
+/**
+ * Read ±`radius` numbered lines around `citedPath:line`.
+ *
+ * The evidence source is explicit: `{rev}` reads that git revision
+ * (`git show REV:path`, for `jev claims` at the reviewed head), while
+ * `{worktree: true}` reads the file on disk (for the `mcp-jev` self-check of an
+ * answer not yet committed). Either way the reader is the server — no caller
+ * ever supplies evidence text.
+ * @returns `{path, line, lines, fileLines, lo, hi}`; throws when unreadable.
+ */
+export function readEvidence(repo, source, citedPath, line, radius = EVIDENCE_RADIUS) {
+  const out = source?.worktree === true
+    ? fs.readFileSync(path.isAbsolute(citedPath) ? citedPath : path.resolve(repo, citedPath), 'utf8')
+    : execFileSync('git', ['-C', repo, 'show', `${source?.rev ?? 'HEAD'}:${citedPath}`], {
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+    })
   const lines = out.split('\n')
   const center = Number.isSafeInteger(line) && line > 0 ? line : 1
   const lo = Math.max(1, center - radius)
@@ -98,6 +106,26 @@ export function readEvidence(repo, rev, citedPath, line, radius = EVIDENCE_RADIU
   const numbered = []
   for (let n = lo; n <= hi; n++) numbered.push(`${n}: ${lines[n - 1]}`)
   return { path: citedPath, line: center, lines: numbered.join('\n'), fileLines: lines.length, lo, hi }
+}
+
+/**
+ * Judge one already-read claim with the one measured question.
+ * @param claim - the claim text (truncated to the measured shape).
+ * @param evidence - the result of `readEvidence`: `{path, lines}`.
+ * @param env - environment carrying the key/endpoint.
+ * @returns `{supported, model}`; `supported` is null when Jev returned none.
+ */
+export async function judgeClaim(claim, evidence, env = process.env) {
+  const { json } = await callJev({
+    state: {
+      claim: trim(claim, CLAIM_TEXT_MAX),
+      evidence: { path: evidence.path, lines: trim(evidence.lines, EVIDENCE_CHARS_MAX) },
+    },
+    questions: { [CLAIM_SUPPORTED_ID]: CLAIM_SUPPORTED_QUESTION },
+    env,
+  })
+  const value = json.answers?.[CLAIM_SUPPORTED_ID]?.noul
+  return { supported: typeof value === 'number' ? value : null, model: json.model ?? null }
 }
 
 /** The stored claim report for a job, or null. */
@@ -135,7 +163,7 @@ export async function runClaims(jobId, job, ctx, opts = {}) {
       continue
     }
     try {
-      units.push({ claim, evidence: readEvidence(repo, rev, claim.path, claim.line) })
+      units.push({ claim, evidence: readEvidence(repo, { rev }, claim.path, claim.line) })
     } catch {
       skipped.missingFile++
     }
@@ -147,7 +175,7 @@ export async function runClaims(jobId, job, ctx, opts = {}) {
     jobId,
     repo,
     rev,
-    threshold: SUPPORTED_THRESHOLD,
+    threshold: CLAIM_SUPPORT_THRESHOLD,
     total: found.length,
     considered: units.length,
     skipped,
@@ -159,20 +187,13 @@ export async function runClaims(jobId, job, ctx, opts = {}) {
 
   let model = null
   const results = await pool(units, CONCURRENCY, async (unit) => {
-    const { json } = await callJev({
-      state: {
-        claim: trim(unit.claim.sentence, CLAIM_TEXT_MAX),
-        evidence: { path: unit.evidence.path, lines: trim(unit.evidence.lines, EVIDENCE_CHARS_MAX) },
-      },
-      questions: { [CLAIM_SUPPORTED_ID]: CLAIM_SUPPORTED_QUESTION },
-      env,
-    })
-    model = model ?? json.model ?? null
-    return { unit, score: json.answers?.[CLAIM_SUPPORTED_ID]?.noul ?? null }
+    const judged = await judgeClaim(unit.claim.sentence, unit.evidence, env)
+    model = model ?? judged.model ?? null
+    return { unit, score: judged.supported }
   })
 
   const unsupported = results
-    .filter((entry) => typeof entry.score === 'number' && entry.score < SUPPORTED_THRESHOLD)
+    .filter((entry) => typeof entry.score === 'number' && entry.score < CLAIM_SUPPORT_THRESHOLD)
     .map((entry) => ({
       path: entry.unit.evidence.path,
       line: entry.unit.evidence.line,
