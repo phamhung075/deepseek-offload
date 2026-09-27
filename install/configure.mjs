@@ -1228,6 +1228,9 @@ function projectLinks(project) {
     entry(path.join('scripts', 'dsh-offload.mjs')),
     entry(path.join('scripts', 'deepseek-offload.mjs')),
     entry(path.join('scripts', 'session-tail.mjs')),
+    // The optional Jev commands live in `scripts/jev/`; the runner imports
+    // them lazily, so the directory is linked whole.
+    entry(path.join('scripts', 'jev')),
     entry('references'),
   ]
 }

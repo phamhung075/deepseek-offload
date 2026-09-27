@@ -168,6 +168,7 @@ test('the project gains the skill entry point and both scripts, not just their d
     '.agents/skills/deepseek-offload/scripts/dsh-offload.mjs',
     '.agents/skills/deepseek-offload/scripts/deepseek-offload.mjs',
     '.agents/skills/deepseek-offload/scripts/session-tail.mjs',
+    '.agents/skills/deepseek-offload/scripts/jev',
     '.agents/skills/deepseek-offload/references',
   ])
   for (const { target } of entries) assert.equal(existsSync(target), true, `the package ships ${target}`)

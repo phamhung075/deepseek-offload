@@ -1073,6 +1073,17 @@ async function commandStart(positional, flags) {
     mcpConfig = null
   }
 
+  if (flags['jev-lint'] === true || process.env.DSH_OFFLOAD_JEV_LINT === '1') {
+    // Advisory only: the lint prints warnings and then the job starts anyway.
+    // Dynamic import keeps the optional Jev modules out of every non-Jev run.
+    // With --json the findings go to stderr so stdout stays one JSON document.
+    const { runStartLint } = await import('./jev/lint.mjs')
+    await runStartLint(prompt, {
+      readOnly: flags['read-only'] === true,
+      stdout: flags.json === true ? process.stderr : process.stdout,
+    })
+  }
+
   const now = Date.now()
   const deferredUntil = flags['defer-to-off-peak'] === true && isPeakAt(now) ? nextOffPeakStart(now) : null
 
@@ -2041,6 +2052,10 @@ function usage() {
                                    so it cannot modify a file at all (default:
                                    workspace-write, mutations inside the workspace)
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
+                                 --jev-lint  run the UNVALIDATED Jev work-order lint
+                                   before dispatch and print its warnings; advisory
+                                   only (never blocks the start); also enabled by
+                                   DSH_OFFLOAD_JEV_LINT=1
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
   resume <jobId> ["<extra>"]   continue an interrupted job's session in a new job
@@ -2063,6 +2078,20 @@ function usage() {
                                landed in the GUI's Ungrouped bucket when
                                --all covers every session in the store)
   mcp-servers [--mcp-config FILE] [--json]   which MCP servers a job would receive
+  jev review <jobId> --repo DIR --base REV [--head REV] [--json]
+  jev review --prompt-file F --repo DIR --base REV [--head REV] [--json]
+                               optional TypeSafe Jev pre-screen of a job's diff
+                               against its work order; exit 3 when flagged, 0 when
+                               clean, and writes <jobId>.jev-review.json
+  jev lint --prompt-file F [--read-only] [--json]
+                               brief, UNVALIDATED work-order check (advisory,
+                               always exit 0)
+  jev watch <jobId> [--interval-ms N] [--timeout-ms N]
+                               UNVALIDATED progress triage; exit 4 on a
+                               looping/blocked/off-task verdict, run it with
+                               run_in_background: true
+                               Jev is optional and a pre-screen only — the
+                               orchestrator still reviews every diff.
 
 Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              DEEPSEEK_MCP_TIMEOUT_MS, DEEPSEEK_MCP_CONFIG, DEEPSEEK_MCP_SKIP,
@@ -2072,7 +2101,11 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              --read-only sets it),
              DEEPSEEK_WORKSPACE_ATTACH (=0 to stop asking the GUI to group jobs),
              DEEPSEEK_WORKSPACE_ATTACH_DIR, DEEPSEEK_WORKSPACE_ATTACH_WAIT_MS,
-             DSH_OFFLOAD_JOB_DIR, DSH_GUI_URL
+             DSH_OFFLOAD_JOB_DIR, DSH_GUI_URL,
+             TYPESAFE_API_KEY | TYPESAFE_AI_API (enable Jev; never printed),
+             TYPESAFE_API_URL (override the Jev endpoint),
+             DSH_OFFLOAD_JEV_LINT (=1 to run the Jev lint on every start),
+             DSH_OFFLOAD_SESSION_TAIL (override the tailer jev watch runs)
 `)
 }
 
@@ -2143,6 +2176,24 @@ async function main() {
     case 'window':
       process.exitCode = commandWindow(positional, flags)
       return
+    case 'jev': {
+      // Optional TypeSafe Jev judgments. The job-store helpers are passed in,
+      // so the jev modules never duplicate the runner's paths.
+      const { runJevCli } = await import('./jev/cli.mjs')
+      process.exitCode = await runJevCli(positional, flags, {
+        readJob,
+        loadJob: (jobId) => reconcileJob(readJob(jobId)),
+        isActive: isActiveState,
+        jobsDir: JOBS_DIR,
+        writeJsonAtomic,
+        projectRoot: PROJECT_ROOT,
+        sessionTail: process.env.DSH_OFFLOAD_SESSION_TAIL || SESSION_TAIL,
+        env: process.env,
+        stdout: process.stdout,
+        stderr: process.stderr,
+      })
+      return
+    }
     case undefined:
     case 'help':
     case '--help':
