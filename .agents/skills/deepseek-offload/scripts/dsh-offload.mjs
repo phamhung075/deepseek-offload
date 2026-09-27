@@ -844,6 +844,41 @@ function sendSocketRequest(sockPath, payload, timeoutMs = 10_000) {
 // ---------------------------------------------------------------------------
 // Worker: owns one background job
 // ---------------------------------------------------------------------------
+/**
+ * Run the optional Jev pre-screen for a job that just settled. The job's own
+ * final state is already on disk, so a review failure here changes neither the
+ * state nor the worker's exit code; it only records `jevReview` on the job.
+ * @param jobId - the settled job.
+ */
+async function finalizeAutoReview(jobId) {
+  if (!fs.existsSync(jobFile(jobId))) return
+  try {
+    const job = readJob(jobId)
+    if (!job.reviewRepo || job.jevReview) return
+    const { runAutoReview } = await import('./jev/auto.mjs')
+    const jevReview = await runAutoReview(jobId, job, {
+      readJob,
+      jobsDir: JOBS_DIR,
+      writeJsonAtomic,
+      env: process.env,
+      projectRoot: PROJECT_ROOT,
+    })
+    updateJob(jobId, { jevReview })
+  } catch (error) {
+    try {
+      updateJob(jobId, {
+        jevReview: {
+          state: 'error',
+          error: error && error.message ? error.message : String(error),
+          finishedAt: Date.now(),
+        },
+      })
+    } catch {
+      /* the job file may be gone */
+    }
+  }
+}
+
 async function runWorker(jobId) {
   const job = readJob(jobId)
   const startedAt = job.startedAt
@@ -941,6 +976,7 @@ async function runWorker(jobId) {
         elapsedMs: finishedAt - startedAt,
       })
       fs.writeFileSync(resultFile(jobId), `${message}\n`)
+      await finalizeAutoReview(jobId)
       return 1
     }
 
@@ -959,6 +995,7 @@ async function runWorker(jobId) {
       elapsedMs: finishedAt - startedAt,
       resultFile: path.relative(PROJECT_ROOT, resultFile(jobId)),
     })
+    await finalizeAutoReview(jobId)
     return 0
   } catch (error) {
     const message = error && error.message ? error.message : String(error)
@@ -967,6 +1004,7 @@ async function runWorker(jobId) {
     } catch {
       /* the job file may be unreadable if it was deleted mid-run */
     }
+    await finalizeAutoReview(jobId)
     return 1
   } finally {
     if (updateServer !== undefined) {
@@ -1073,6 +1111,15 @@ async function commandStart(positional, flags) {
     mcpConfig = null
   }
 
+  // Auto-review target, resolved before the worker spawns so `reviewBase` is the
+  // commit the job starts from. A bad value warns and never blocks the start.
+  const { resolveStartReviewTarget } = await import('./jev/auto.mjs')
+  const review = resolveStartReviewTarget({
+    flags,
+    env: process.env,
+    warn: (message) => process.stderr.write(`dsh-offload: ${message}\n`),
+  })
+
   if (flags['jev-lint'] === true || process.env.DSH_OFFLOAD_JEV_LINT === '1') {
     // Advisory only: the lint prints warnings and then the job starts anyway.
     // Dynamic import keeps the optional Jev modules out of every non-Jev run.
@@ -1102,6 +1149,11 @@ async function commandStart(positional, flags) {
     // Read-only is the whole point of an investigation job, so it is a flag the
     // runner enforces through the job's file policy, not a sentence in a prompt.
     readOnly: flags['read-only'] === true,
+    // The clone the job changes, and the commit it started from. Both are set
+    // only when `--review-repo` (or DSH_OFFLOAD_REVIEW_REPO) resolved; the
+    // worker reviews that clone's diff once the job settles.
+    reviewRepo: review.reviewRepo,
+    reviewBase: review.reviewBase,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : DEFAULT_TIMEOUT_MS,
     sessionId: null,
     startedAt: now,
@@ -1241,6 +1293,14 @@ async function commandResume(positional, flags) {
     mcpConfig = null
   }
 
+  const { resolveResumeReviewTarget } = await import('./jev/auto.mjs')
+  const review = resolveResumeReviewTarget({
+    flags,
+    env: process.env,
+    source,
+    warn: (message) => process.stderr.write(`dsh-offload: ${message}\n`),
+  })
+
   const now = Date.now()
   const jobId = newJobId()
   const baseLabel = typeof flags.label === 'string' ? flags.label : base.label
@@ -1254,6 +1314,10 @@ async function commandResume(positional, flags) {
     permission: base.permission ?? DEFAULT_PERMISSION,
     allowGitWrite,
     readOnly,
+    // The resumed job reviews the same clone, against the original start commit,
+    // unless this resume named its own target.
+    reviewRepo: review.reviewRepo,
+    reviewBase: review.reviewBase,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : (base.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     resumeOf: source === null ? null : source.jobId,
     resumeSessionId: sessionId,
@@ -1289,6 +1353,10 @@ function commandStatus(positional, flags) {
     return 0
   }
   process.stdout.write(`${describeJob(job)}\n`)
+  if (job.reviewRepo) {
+    const reviewState = job.jevReview?.state ?? (workerAlive(job) ? 'running' : 'not run')
+    process.stdout.write(`jev review  ${reviewState}\n`)
+  }
   if (job.state === 'running') {
     process.stdout.write(`progress  ${job.progressChars} chars streamed at last notification\n`)
     process.stdout.write('\nThe GUI lists this session but cannot show it running; follow it with:\n')
@@ -1300,23 +1368,63 @@ function commandStatus(positional, flags) {
   return 0
 }
 
-function commandResult(positional, flags) {
+/**
+ * Print a job's final result, plus its Jev pre-screen block when the job has a
+ * review clone. `--jev-exit` turns a flagged review into exit 3; every other
+ * exit code is unchanged.
+ * @param positional - `[jobId]`.
+ * @param flags - `--json`, `--jev-exit`, `--no-jev-review`.
+ * @param options - `waitForReview` makes a settled job wait for the worker's
+ *   in-flight review instead of reporting it as still running.
+ * @returns process exit code.
+ */
+async function commandResult(positional, flags, { waitForReview = false } = {}) {
   ensureDirs()
   const jobId = positional[0]
   if (jobId === undefined) fail('result requires a job id')
-  const job = reconcileJob(readJob(jobId))
+  let job = reconcileJob(readJob(jobId))
   const file = resultFile(jobId)
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+  // The block only applies once the job has settled; while it is active the
+  // existing "still running" output stands. `--no-jev-review` suppresses both
+  // the text block and the JSON field.
+  const showReview = job.reviewRepo !== undefined && job.reviewRepo !== null
+    && flags['no-jev-review'] !== true && !isActiveState(job.state)
+  let auto = null
+  if (showReview) {
+    try {
+      auto = await import('./jev/auto.mjs')
+      job = await auto.ensureJevReview(jobId, job, {
+        wait: waitForReview,
+        workerAlive,
+        updateJob,
+        readJob,
+        jobsDir: JOBS_DIR,
+        writeJsonAtomic,
+        env: process.env,
+        projectRoot: PROJECT_ROOT,
+      })
+    } catch {
+      auto = null
+    }
+  }
+  const jevExit = flags['jev-exit'] === true && job.jevReview?.state === 'flagged' ? 3 : null
   if (flags.json === true) {
-    print({ jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, result: text }, true)
-    return job.state === 'error' ? 1 : 0
+    const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, result: text }
+    if (showReview && job.jevReview) payload.jevReview = job.jevReview
+    print(payload, true)
+    return jevExit ?? (job.state === 'error' ? 1 : 0)
   }
   if (isActiveState(job.state)) {
     process.stdout.write(`job ${jobId} is still ${job.state}; no result yet.\n${describeJob(job)}\n`)
     return 2
   }
   process.stdout.write(`${describeJob(job)}\n\n--- result ---\n${text === '' ? '(no output captured)\n' : text}`)
-  return job.state === 'error' ? 1 : 0
+  if (showReview && auto !== null && job.jevReview) {
+    const block = auto.renderJevBlock(job.jevReview, { jobsDir: JOBS_DIR, jobId })
+    if (block !== null) process.stdout.write(`\n${block}\n`)
+  }
+  return jevExit ?? (job.state === 'error' ? 1 : 0)
 }
 
 /**
@@ -1551,7 +1659,9 @@ async function commandWait(positional, flags) {
     }
   }
   if (human) process.stdout.write('\n')
-  return commandResult([jobId], flags)
+  // The worker writes its final state before it reviews, so wait for the
+  // in-flight review rather than reporting it as still running.
+  return commandResult([jobId], flags, { waitForReview: true })
 }
 
 function commandList(positional, flags) {
@@ -2052,6 +2162,15 @@ function usage() {
                                    so it cannot modify a file at all (default:
                                    workspace-write, mutations inside the workspace)
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
+                                 --review-repo DIR  review the diff DIR receives once
+                                   the job settles (DIR must be a git work tree; the
+                                   toplevel is stored). Its untracked files are
+                                   reviewed too, so point it at the clone the job
+                                   changes, never at --cwd. Also enabled by
+                                   DSH_OFFLOAD_REVIEW_REPO=DIR; --no-jev-review
+                                   disables it for this job.
+                                 --review-base REV  the revision the review diffs from
+                                   (default: HEAD at start time)
                                  --jev-lint  run the UNVALIDATED Jev work-order lint
                                    before dispatch and print its warnings; advisory
                                    only (never blocks the start); also enabled by
@@ -2063,11 +2182,18 @@ function usage() {
                                  the workspace first). --session ID --cwd DIR resumes
                                  a session with no job record; --label --timeout-ms
                                  --read-only --allow-git-write --mcp-config --json
+                                 --review-repo --review-base --no-jev-review copy or
+                                 override the source job's auto-review target
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
-  result <jobId> [--json]      final report text
+  result <jobId> [--json] [--jev-exit] [--no-jev-review]
+                               final report text, then the Jev pre-screen block when
+                               the job has a review clone; --jev-exit exits 3 when
+                               the review flagged
   guard  <jobId> [--json]      git write guard state, and any refs the job pushed
                                into its sandbox instead of the real remote
-  wait   <jobId> [--timeout-ms N]   block until the job settles, then print the result
+  wait   <jobId> [--timeout-ms N] [--json] [--jev-exit] [--no-jev-review]
+                               block until the job settles, then print the result
+                               (waits for an in-flight review up to 180000 ms)
   update <jobId> "<new info>"    steer a running job onto the right track
   cancel <jobId>                stop a running job outright, no redirect
   list   [--all] [--json]      recent jobs
@@ -2104,6 +2230,7 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              DSH_OFFLOAD_JOB_DIR, DSH_GUI_URL,
              TYPESAFE_API_KEY | TYPESAFE_AI_API (enable Jev; never printed),
              TYPESAFE_API_URL (override the Jev endpoint),
+             DSH_OFFLOAD_REVIEW_REPO (start/resume default for --review-repo),
              DSH_OFFLOAD_JEV_LINT (=1 to run the Jev lint on every start),
              DSH_OFFLOAD_SESSION_TAIL (override the tailer jev watch runs)
 `)
@@ -2144,7 +2271,7 @@ async function main() {
       process.exitCode = commandStatus(positional, flags)
       return
     case 'result':
-      process.exitCode = commandResult(positional, flags)
+      process.exitCode = await commandResult(positional, flags)
       return
     case 'guard':
       process.exitCode = commandGuard(positional, flags)

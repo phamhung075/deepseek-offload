@@ -22,6 +22,11 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
                                UNVALIDATED progress triage; exit 4 on a
                                looping/blocked/off-task verdict, 0 on settle.
                                Run it with run_in_background: true.
+                             Auto-review is configured on start/resume with
+                             --review-repo DIR (or DSH_OFFLOAD_REVIEW_REPO); the
+                             worker runs it when the job settles and result/wait
+                             print the stored block (--jev-exit exits 3 on a
+                             flagged review).
                              Jev is optional (TYPESAFE_API_KEY or
                              TYPESAFE_AI_API; endpoint TYPESAFE_API_URL).
                              It is a pre-screen — the orchestrator still
