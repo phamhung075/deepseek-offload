@@ -21,6 +21,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { isEnabled } from './client.mjs'
 import { runReview, EXIT_CLEAN, EXIT_FLAGGED } from './review.mjs'
+import { runClaims, extractClaims, readResultText, readClaimsReport } from './claims.mjs'
 
 /** Bound the whole in-process review; a slow API must not hold the worker forever. */
 export const AUTO_REVIEW_TIMEOUT_MS = 180_000
@@ -199,11 +200,33 @@ export async function runAutoReview(jobId, job, ctx) {
 
   const report = readReport(ctx.jobsDir, jobId)
   if (report === null) return { state: 'empty', finishedAt: Date.now() }
+
+  // Claims are a separate signal: they never change the diff verdict, only
+  // `claimsFlagged`. They run only when the result text actually cites code.
+  let claimsFlagged = false
+  let claimsConsidered = 0
+  let claimsUnsupported = 0
+  try {
+    const text = readResultText(ctx.jobsDir, jobId)
+    if (text !== '' && extractClaims(text).length > 0) {
+      const claims = await runClaims(jobId, job, ctx, { repo: job.reviewRepo })
+      claimsFlagged = claims.claimsFlagged === true
+      claimsConsidered = claims.considered ?? 0
+      claimsUnsupported = claims.unsupportedCount ?? 0
+    }
+  } catch {
+    /* claims are advisory; a failure never changes the review */
+  }
+
   return {
     state: report.flagged === true ? 'flagged' : 'clean',
     flaggedGroups: Array.isArray(report.groups) ? report.groups.filter((group) => group.verdict === 'flagged').length : 0,
     groups: Array.isArray(report.groups) ? report.groups.length : 0,
     meanInScope: typeof report.meanInScope === 'number' ? report.meanInScope : null,
+    ruleHits: typeof report.ruleHits === 'number' ? report.ruleHits : 0,
+    claimsFlagged,
+    claimsConsidered,
+    claimsUnsupported,
     reportFile: storedReportPath(ctx.projectRoot, ctx.jobsDir, jobId),
     finishedAt: Date.now(),
   }
@@ -266,6 +289,14 @@ export function renderJevBlock(jevReview, { jobsDir, jobId }) {
   if (report === null) return `jev review: ${jevReview.state} (report missing)`
 
   const lines = [REVIEW_BLOCK_HEADER]
+  for (const finding of report.rules?.findings ?? []) {
+    lines.push(`rule  ${finding.severity}  ${finding.message}  ${finding.file} ${finding.range}`)
+  }
+  if (report.rules?.configWarning) lines.push(`rule  config warning: ${report.rules.configWarning}`)
+  if (report.rules?.pathScope?.skipped) lines.push(`rule  pathScope skipped — ${report.rules.pathScope.reason ?? 'no paths in the work order'}`)
+  if (Array.isArray(report.rules?.ignored) && report.rules.ignored.length > 0) {
+    for (const ignored of report.rules.ignored) lines.push(`rule  ignored by ignorePaths  ${ignored.file}`)
+  }
   for (const group of report.groups ?? []) {
     let line = `${shortSha(group.sha)}  ${group.verdict}  P(none)=${probability(group.pNone)}`
     if (group.chosen !== null && group.chosen !== undefined) {
@@ -277,6 +308,15 @@ export function renderJevBlock(jevReview, { jobsDir, jobId }) {
   lines.push(lookHere.length === 0
     ? 'look here (none)'
     : `look here: ${lookHere.map((entry) => `${entry.file} ${entry.range} in_scope=${probability(entry.inScope)}`).join('  ')}`)
+  if (jevReview.claimsFlagged === true) {
+    const claims = readClaimsReport(jobsDir, jobId)
+    const unsupported = claims?.unsupported ?? []
+    lines.push(`claims to verify (${unsupported.length}/${claims?.considered ?? 0} unsupported; not a diff verdict):`)
+    for (const claim of unsupported) {
+      const sentence = String(claim.sentence ?? '').replace(/\s+/g, ' ').slice(0, 120)
+      lines.push(`  ${claim.path}:${claim.line}  supported=${probability(claim.supported)}  ${sentence}`)
+    }
+  }
   lines.push(`report: ${jevReview.reportFile ?? reportFile(jobsDir, jobId)}`)
   return lines.join('\n')
 }
