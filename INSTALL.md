@@ -316,33 +316,78 @@ node "$R" mcp-servers --mcp-config "$PWD/.mcp.json"     # dry run: what would be
 node "$R" start "<task>" --mcp-config "$PWD/.mcp.json" --label <name>
 ```
 
-### Optional — TypeSafe Jev judgments
+### Optional — TypeSafe Jev
 
-Jev is off unless a key is exported in the shell that runs the runner. It adds an optional diff
-pre-screen (`jev review`, with code-enforced `neverTouch`/`pathScope`/`ignorePaths` hard rules from
-`.agents/jev.json`), report claim checking (`jev claims`), work-order lint (`jev lint`, and
-`start --jev-lint`), progress triage (`jev watch`, and `wait --jev-watch` early return), failure
-triage (`jev triage`), and a local decision log (`jev decide` / `jev log`). Set the key once in the
-environment — never in a job prompt or a config file:
+Jev is off unless a key is exported in the shell that runs the runner. When enabled it adds an
+advisory diff pre-screen, claim checking, a work-order lint, progress and failure triage, planning
+aids, and a local decision log. Jev never approves anything: it is a pre-screen, and the orchestrator
+still reviews every diff.
+
+**Key setup.** Set the key in the environment only — never in a job prompt or a config file:
 
 ```sh
 export TYPESAFE_API_KEY=<key>        # or the workspace TYPESAFE_AI_API
-# export TYPESAFE_API_URL=https://api.typesafe.ai/v1/systemone   # override for a stub/proxy
-# export DSH_OFFLOAD_JEV_LINT=1      # run the lint on every start by default
-# export DSH_OFFLOAD_JEV_WATCH=1     # enable wait --jev-watch by default
-# export DSH_OFFLOAD_JEV_CONFIG=PATH # override <projectRoot>/.agents/jev.json
-# export DSH_OFFLOAD_REVIEW_REPO=DIR # default for start/resume --review-repo
 ```
 
-Pass `start --review-repo <the clone the job changes>` (or resume it) and the review runs
-automatically when the job settles, so `result`/`wait` print the look-here block — that clone's
-untracked files are reviewed too. The planning aids `jev route`, `jev skills`, and `jev conflicts`
-only suggest (roles, skills, cross-job finding conflicts), and `start --jev-mcp` mounts the
-`.agents/mcp-jev` self-check server for the worker.
+**Environment variables.** All optional.
 
-With no key every jev command prints one line (`jev: disabled — set TYPESAFE_API_KEY`) and exits 0,
-and no other command changes. The key is never printed, logged, or persisted. Jev is a pre-screen,
-not an approval: the orchestrator still reviews every diff. Details and exit codes are in
+| Variable | Default | Effect |
+| :--- | :--- | :--- |
+| `TYPESAFE_API_KEY` / `TYPESAFE_AI_API` | unset | Enable every jev command. Either key works; it is read per call and never printed, logged, or persisted. |
+| `TYPESAFE_API_URL` | `https://api.typesafe.ai/v1/systemone` | Endpoint override (the test suites point it at a local stub). |
+| `DSH_OFFLOAD_REVIEW_REPO` | unset | Default repo for `start`/`resume --review-repo` (auto-review when the job settles). |
+| `DSH_OFFLOAD_JEV_LINT` | unset | `1` runs the Jev lint on every `start`. |
+| `DSH_OFFLOAD_JEV_WATCH` | unset | `1` enables `wait --jev-watch`. |
+| `DSH_OFFLOAD_JEV_CONFIG` | `<projectRoot>/.agents/jev.json` | Hard-rules config path override. |
+| `DSH_OFFLOAD_JEV_ROLES` | `<projectRoot>/.agents/jev-roles.json` | Roles-file override for `jev route`. |
+| `DSH_OFFLOAD_SESSION_TAIL` | the sibling `session-tail.mjs` | Tailer `jev watch` / `jev triage` run. |
+
+**Config files.** Both optional; a missing file means the built-in defaults.
+
+`.agents/jev.json` — the code hard rules evaluated before any Jev call:
+
+```json
+{
+  "neverTouch": ["secrets/**", "*.pem"],
+  "pathScope": "warn",
+  "ignorePaths": ["generated/**"]
+}
+```
+
+`pathScope` is `off` | `warn` (default) | `flag`.
+
+`.agents/jev-roles.json` — roles for `jev route`:
+
+```json
+[
+  { "name": "Backend", "mission": "Services, APIs, storage" },
+  { "name": "Docs",    "mission": "README, guides, examples" }
+]
+```
+
+**What the installer wires.** `install.sh` links `scripts/jev/` (the modules the runner imports
+lazily) and `.agents/mcp-jev/server.cjs` (the worker self-check server `start --jev-mcp` mounts) into
+the project, exactly like the bridge and the skill. `install.sh --update` replaces those when they are
+stale links or copied scripts, like any other project entry. `doctor` has **no** separate Jev check and
+never looks at a key; its `project entries current` line covers the bridge, guard, runner, tailer, and
+the MCP bridge path, not the jev links.
+
+**Verify the disabled path** (no key needed, and it proves the links resolve):
+
+```sh
+R=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
+printf 'Explain the widget in src/widget.mjs. Output a 50-word report.\n' > /tmp/jev-check.md
+env -u TYPESAFE_API_KEY -u TYPESAFE_AI_API node "$R" jev lint --prompt-file /tmp/jev-check.md
+# jev: disabled — set TYPESAFE_API_KEY
+# exit 0
+```
+
+With no key, every jev command that calls the API prints that one line and exits 0, and no other
+command changes; the pure-local `jev decide`/`jev log` need no key, and `jev triage` still returns a
+code rule when the error text matches one. The
+planning aids `jev route`, `jev skills`, and `jev conflicts` only suggest; `start --review-repo <the
+clone the job changes>` runs the review automatically when the job settles, so `result`/`wait` print
+the look-here block; and `start --jev-mcp` mounts the self-check server. Details and exit codes are in
 [`.agents/skills/deepseek-offload/SKILL.md`](.agents/skills/deepseek-offload/SKILL.md) under "Jev
 judgments (optional)".
 
