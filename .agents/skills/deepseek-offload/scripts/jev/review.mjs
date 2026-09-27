@@ -20,6 +20,13 @@ import path from 'node:path'
 import { callJev, isEnabled, DISABLED_LINE, pool, CONCURRENCY, probability } from './client.mjs'
 import { buildGroups, chunkHunks } from './diff.mjs'
 import { HUNK_QUESTIONS, NONE_CHOICE, oddHunkRequest, ODD_HUNK_ID } from './questions.mjs'
+import {
+  loadRulesConfig,
+  applyIgnorePaths,
+  evaluateRules,
+  rulesReport,
+  SEVERITY_FLAG,
+} from './rules.mjs'
 
 /**
  * Flag a group when P(none) falls below this. 0.5 is the measured threshold:
@@ -117,6 +124,26 @@ function renderHuman(report, ctx) {
   lines.push(`work order ${report.workOrderSource}`)
   lines.push(`groups     ${report.groups.length}`)
   lines.push('')
+  if (report.rules.configWarning !== null && report.rules.configWarning !== undefined) {
+    lines.push(`warning    ${report.rules.configWarning}`)
+  }
+  lines.push('rules      (code hard rules, evaluated before any Jev call)')
+  if (report.rules.findings.length === 0) {
+    lines.push('  rule  (none)')
+  } else {
+    for (const finding of report.rules.findings) {
+      lines.push(`  rule  ${finding.severity}  ${finding.message}  ${finding.file} ${finding.range}`)
+    }
+  }
+  if (report.rules.pathScope.mode === 'off') {
+    lines.push('  rule  pathScope off')
+  } else if (report.rules.pathScope.skipped) {
+    lines.push(`  rule  ${report.rules.pathScope.reason ? `pathScope skipped — ${report.rules.pathScope.reason}` : 'pathScope skipped'}`)
+  }
+  if (Array.isArray(report.rules.ignored) && report.rules.ignored.length > 0) {
+    for (const ignored of report.rules.ignored) lines.push(`  rule  ignored by ignorePaths  ${ignored.file}`)
+  }
+  lines.push('')
   report.groups.forEach((group, index) => {
     lines.push(`${index + 1}. ${group.sha}  ${group.subject}`)
     const pNone = typeof group.pNone === 'number' ? `  P(none)=${probability(group.pNone)}` : ''
@@ -150,10 +177,6 @@ function renderHuman(report, ctx) {
  */
 export async function runReview(positional, flags, ctx) {
   const env = ctx.env
-  if (!isEnabled(env)) {
-    ctx.stdout.write(`${DISABLED_LINE}\n`)
-    return EXIT_CLEAN
-  }
   const jobId = positional[0] ?? null
   const promptFile = typeof flags['prompt-file'] === 'string'
     ? flags['prompt-file']
@@ -205,79 +228,122 @@ export async function runReview(positional, flags, ctx) {
     ctx.stderr.write(`dsh-offload: git failed: ${error.message}\n`)
     return EXIT_ERROR
   }
+
+  // Hard rules first: they are code, not Jev, so they run even with no key and
+  // before any request. ignorePaths removes files from the review entirely.
+  const loaded = loadRulesConfig({ projectRoot: ctx.projectRoot, env })
+  const filtered = applyIgnorePaths(groups, loaded.config.ignorePaths)
+  groups = filtered.groups
+  const evaluated = evaluateRules({ groups, workOrder, config: loaded.config, repo })
+  const ruleFlagged = evaluated.flagHits > 0
+  const rulesSection = rulesReport({
+    configPath: loaded.path,
+    warning: loaded.warning,
+    findings: evaluated.findings,
+    pathScope: evaluated.pathScope,
+    ignored: filtered.ignored,
+  })
+  if (loaded.warning !== null) ctx.stderr.write(`dsh-offload: ${loaded.warning}\n`)
+
   if (groups.length === 0) {
     ctx.stdout.write(`jev review: no changes in ${base}..${head} to review\n`)
     return EXIT_CLEAN
   }
 
-  // One detector unit per hunk (A) and per chunk (B). Both reuse the same hunk
-  // objects, so scores attach to the objects the groups already reference.
-  const hunkUnits = []
-  const chunkUnits = []
-  for (const group of groups) {
-    const chunks = chunkHunks(group.hunks)
-    chunks.forEach((hunks, chunkIndex) => {
-      const unit = { group, chunkIndex, hunks, pNone: null, choice: null, confidence: null, probabilities: {} }
-      chunkUnits.push(unit)
-      for (const hunk of hunks) hunkUnits.push({ group, hunk })
-    })
-  }
+  const enabled = isEnabled(env)
+  if (!enabled) ctx.stdout.write(`${DISABLED_LINE}\n`)
+  const runJev = enabled && !ruleFlagged
 
   let model = null
-  let aResults
-  let bResults
-  try {
-    aResults = await pool(hunkUnits, CONCURRENCY, async ({ hunk }) => {
-      const { json } = await callJev({
-        state: { work_order: workOrder, hunk: { file: hunk.file, diff: hunk.text } },
-        questions: HUNK_QUESTIONS,
-        env,
-      })
-      return { hunk, json }
-    })
-    bResults = await pool(chunkUnits, CONCURRENCY, async (unit) => {
-      const request = oddHunkRequest(workOrder, unit.hunks)
-      const { json } = await callJev({ state: request.state, questions: request.questions, env })
-      return { unit, json }
-    })
-  } catch (error) {
-    ctx.stderr.write(`dsh-offload: jev review failed: ${error.message}\n`)
-    return EXIT_ERROR
-  }
-
-  for (const { hunk, json } of aResults) {
-    hunk.inScope = json.answers?.in_scope?.noul ?? null
-    hunk.unrequested = json.answers?.unrequested?.noul ?? null
-    model = model ?? json.model ?? null
-  }
-  for (const { unit, json } of bResults) {
-    const answer = json.answers?.[ODD_HUNK_ID] ?? {}
-    unit.choice = answer.choice ?? null
-    unit.confidence = answer.confidence ?? null
-    unit.probabilities = answer.probabilities ?? {}
-    unit.pNone = unit.probabilities[NONE_CHOICE] ?? null
-    model = model ?? json.model ?? null
-  }
-
-  // Verdict per group: any chunk below FLAG_P_NONE flags the whole group.
+  let meanInScope = null
+  let driftFlagged = false
+  let lookHere = []
   for (const group of groups) {
-    const chunks = chunkUnits.filter((unit) => unit.group === group)
-    group.pNone = chunks.reduce((min, unit) => (
-      typeof unit.pNone === 'number' && (min === null || unit.pNone < min) ? unit.pNone : min
-    ), null)
-    group.verdict = chunks.some((unit) => typeof unit.pNone === 'number' && unit.pNone < FLAG_P_NONE)
-      ? 'flagged'
-      : 'clean'
-    group.chosen = chosenHunk(chunks)
+    group.pNone = null
+    group.chosen = null
+    group.ruleFlagged = false
   }
 
-  const scored = groups.flatMap((group) => group.hunks).filter((hunk) => typeof hunk.inScope === 'number')
-  const meanInScope = scored.length === 0
-    ? null
-    : scored.reduce((sum, hunk) => sum + hunk.inScope, 0) / scored.length
-  const driftFlagged = meanInScope !== null && meanInScope < DRIFT_MEAN_IN_SCOPE
-  const lookHere = buildLookHere(groups)
-  const flagged = groups.some((group) => group.verdict === 'flagged') || driftFlagged
+  if (runJev) {
+    // One detector unit per hunk (A) and per chunk (B). Both reuse the same hunk
+    // objects, so scores attach to the objects the groups already reference.
+    const hunkUnits = []
+    const chunkUnits = []
+    for (const group of groups) {
+      const chunks = chunkHunks(group.hunks)
+      chunks.forEach((hunks, chunkIndex) => {
+        const unit = { group, chunkIndex, hunks, pNone: null, choice: null, confidence: null, probabilities: {} }
+        chunkUnits.push(unit)
+        for (const hunk of hunks) hunkUnits.push({ group, hunk })
+      })
+    }
+
+    let aResults
+    let bResults
+    try {
+      aResults = await pool(hunkUnits, CONCURRENCY, async ({ hunk }) => {
+        const { json } = await callJev({
+          state: { work_order: workOrder, hunk: { file: hunk.file, diff: hunk.text } },
+          questions: HUNK_QUESTIONS,
+          env,
+        })
+        return { hunk, json }
+      })
+      bResults = await pool(chunkUnits, CONCURRENCY, async (unit) => {
+        const request = oddHunkRequest(workOrder, unit.hunks)
+        const { json } = await callJev({ state: request.state, questions: request.questions, env })
+        return { unit, json }
+      })
+    } catch (error) {
+      ctx.stderr.write(`dsh-offload: jev review failed: ${error.message}\n`)
+      return EXIT_ERROR
+    }
+
+    for (const { hunk, json } of aResults) {
+      hunk.inScope = json.answers?.in_scope?.noul ?? null
+      hunk.unrequested = json.answers?.unrequested?.noul ?? null
+      model = model ?? json.model ?? null
+    }
+    for (const { unit, json } of bResults) {
+      const answer = json.answers?.[ODD_HUNK_ID] ?? {}
+      unit.choice = answer.choice ?? null
+      unit.confidence = answer.confidence ?? null
+      unit.probabilities = answer.probabilities ?? {}
+      unit.pNone = unit.probabilities[NONE_CHOICE] ?? null
+      model = model ?? json.model ?? null
+    }
+
+    // Verdict per group: any chunk below FLAG_P_NONE flags the whole group.
+    for (const group of groups) {
+      const chunks = chunkUnits.filter((unit) => unit.group === group)
+      group.pNone = chunks.reduce((min, unit) => (
+        typeof unit.pNone === 'number' && (min === null || unit.pNone < min) ? unit.pNone : min
+      ), null)
+      group.verdict = chunks.some((unit) => typeof unit.pNone === 'number' && unit.pNone < FLAG_P_NONE)
+        ? 'flagged'
+        : 'clean'
+      group.chosen = chosenHunk(chunks)
+    }
+
+    const scored = groups.flatMap((group) => group.hunks).filter((hunk) => typeof hunk.inScope === 'number')
+    meanInScope = scored.length === 0
+      ? null
+      : scored.reduce((sum, hunk) => sum + hunk.inScope, 0) / scored.length
+    driftFlagged = meanInScope !== null && meanInScope < DRIFT_MEAN_IN_SCOPE
+    lookHere = buildLookHere(groups)
+  } else {
+    // Jev was skipped (rule hit or no key): a group is flagged only by a rule.
+    for (const group of groups) {
+      group.ruleFlagged = evaluated.findings.some((finding) => (
+        finding.severity === SEVERITY_FLAG && finding.sha === group.sha
+      ))
+      group.verdict = group.ruleFlagged ? 'flagged' : 'not-judged'
+    }
+  }
+
+  const flagged = ruleFlagged
+    || groups.some((group) => group.verdict === 'flagged')
+    || driftFlagged
 
   const report = {
     kind: 'jev-review',
@@ -288,6 +354,8 @@ export async function runReview(positional, flags, ctx) {
     head,
     workOrderSource: source,
     flagged,
+    ruleFlagged,
+    ruleHits: evaluated.flagHits,
     driftFlagged,
     meanInScope,
     model,
@@ -298,12 +366,14 @@ export async function runReview(positional, flags, ctx) {
       largeChangedLines: LARGE_CHANGED_LINES,
       largeHunkInScope: LARGE_HUNK_IN_SCOPE,
     },
+    rules: rulesSection,
     groups: groups.map((group) => ({
       sha: group.sha,
       subject: group.subject,
       kind: group.kind,
       hunkCount: group.hunks.length,
       verdict: group.verdict,
+      ruleFlagged: group.ruleFlagged === true,
       pNone: group.pNone,
       chosen: group.chosen,
       hunks: group.hunks.map((hunk) => ({
