@@ -57,6 +57,71 @@ export function readActivity(sessionTail, jobId, projectRoot, env) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * One progress-triage pass for a running job: read the newest activity and ask
+ * the `progress` choice. Shared by `jev watch` and `wait --jev-watch`, so the
+ * question and threshold have one source of truth.
+ * @returns `{choice, confidence, activity, problem, finished}`.
+ */
+export async function probeProgress(job, { env, projectRoot, sessionTail }) {
+  const activity = readActivity(sessionTail, job.jobId, projectRoot, env)
+  const { json } = await callJev({
+    state: { work_order: typeof job.prompt === 'string' ? job.prompt : '', activity: activity.join('\n') },
+    questions: { [PROGRESS_ID]: progressQuestion() },
+    env,
+  })
+  const answer = json.answers?.[PROGRESS_ID] ?? {}
+  const choice = typeof answer.choice === 'string' ? answer.choice : null
+  const confidence = typeof answer.confidence === 'number' ? answer.confidence : 1
+  const confident = confidence >= WATCH_MIN_CONFIDENCE
+  return {
+    choice,
+    confidence,
+    activity,
+    problem: confident && PROBLEM_VERDICTS.has(choice),
+    finished: confident && choice === 'finished',
+  }
+}
+
+/** The verdict + last activity + steering advice `wait --jev-watch` prints. */
+export function renderWaitWatchProblem(jobId, probe) {
+  const lines = [
+    `jev watch: ${probe.choice} — stopping the wait (the job keeps running)`,
+    `confidence ${probe.confidence.toFixed(2)}`,
+    'UNVALIDATED progress triage.',
+    '',
+    'last activity:',
+  ]
+  for (const line of probe.activity.slice(-WATCH_PROBLEM_LINES)) lines.push(`  ${line}`)
+  lines.push('')
+  lines.push('advice:')
+  lines.push(`  dsh-offload update ${jobId} "..."`)
+  lines.push(`  dsh-offload cancel ${jobId}`)
+  return lines.join('\n')
+}
+
+/**
+ * A watcher `wait --jev-watch` drives: `due()` gates the interval, `probe(job)`
+ * returns the printed problem block or null. It never throws out of `probe` —
+ * a watcher failure must not abort a wait.
+ */
+export function createWaitWatcher({ jobId, intervalMs, env, projectRoot, sessionTail, now = () => Date.now() }) {
+  let nextAt = 0
+  return {
+    due: () => now() >= nextAt,
+    async probe(job) {
+      nextAt = now() + intervalMs
+      let probe
+      try {
+        probe = await probeProgress(job, { env, projectRoot, sessionTail })
+      } catch {
+        return null
+      }
+      return probe.problem ? renderWaitWatchProblem(jobId, probe) : null
+    },
+  }
+}
+
+/**
  * `jev watch <jobId> [--interval-ms N] [--timeout-ms N]`.
  * @returns 0 on settle or a finished verdict, 4 on a problem verdict, 5 on
  *   timeout, 1 on an error.
@@ -87,29 +152,21 @@ export async function runWatch(positional, flags, ctx) {
       ctx.stdout.write(`jev watch: job ${jobId} settled at state=${job.state}\n`)
       return 0
     }
-    const activity = readActivity(ctx.sessionTail, jobId, ctx.projectRoot, env)
-    let answer
+    let probe
     try {
-      const { json } = await callJev({
-        state: { work_order: typeof job.prompt === 'string' ? job.prompt : '', activity: activity.join('\n') },
-        questions: { [PROGRESS_ID]: progressQuestion() },
-        env,
-      })
-      answer = json.answers?.[PROGRESS_ID] ?? {}
+      probe = await probeProgress(job, { env, projectRoot: ctx.projectRoot, sessionTail: ctx.sessionTail })
     } catch (error) {
       ctx.stderr.write(`dsh-offload: jev watch failed: ${error.message}\n`)
       return 1
     }
-    const choice = typeof answer.choice === 'string' ? answer.choice : null
-    const confidence = typeof answer.confidence === 'number' ? answer.confidence : 1
-    if (confidence >= WATCH_MIN_CONFIDENCE && choice === 'finished') {
-      ctx.stdout.write(`jev watch: ${jobId} reported finished (confidence ${confidence.toFixed(2)})\n`)
+    if (probe.finished) {
+      ctx.stdout.write(`jev watch: ${jobId} reported finished (confidence ${probe.confidence.toFixed(2)})\n`)
       return 0
     }
-    if (confidence >= WATCH_MIN_CONFIDENCE && PROBLEM_VERDICTS.has(choice)) {
-      ctx.stdout.write(`jev watch: ${choice} — pre-screen for the orchestrator's review\n`)
-      ctx.stdout.write(`confidence ${confidence.toFixed(2)}\n\nlast activity:\n`)
-      for (const line of activity.slice(-WATCH_PROBLEM_LINES)) ctx.stdout.write(`  ${line}\n`)
+    if (probe.problem) {
+      ctx.stdout.write(`jev watch: ${probe.choice} — pre-screen for the orchestrator's review\n`)
+      ctx.stdout.write(`confidence ${probe.confidence.toFixed(2)}\n\nlast activity:\n`)
+      for (const line of probe.activity.slice(-WATCH_PROBLEM_LINES)) ctx.stdout.write(`  ${line}\n`)
       return 4
     }
     if (Date.now() > deadline) {
