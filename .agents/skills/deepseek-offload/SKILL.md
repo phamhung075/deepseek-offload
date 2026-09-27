@@ -270,14 +270,14 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | :--- | :--- | :--- |
 | `doctor` | Checks node, bridge, `DSH_HOME`, model patch, MCP config, job-store writability, workspace grouping, `resume` support (the bridge's `--probe` reports `resumeSessionId` and the Harness ACP agent advertises `session/resume`), and whether every project entry still matches the package. | `0` ok, `1` fail |
 | `window` | Reports whether DeepSeek pricing is peak or off-peak right now, and when it next flips — see "Off-peak planning" below. | `0` |
-| `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. The prompt comes from the positional argument, from `--prompt-file FILE` / `-f FILE`, or from stdin (`-`, or no prompt argument on a non-interactive stdin); use the file/stdin forms for anything multi-line. `--detach` returns instantly. `--read-only` pins the job to the Harness's read-only file policy, so it cannot modify a file; `--allow-git-write` lifts the git write guard instead, and the two are mutually exclusive. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
-| `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
-| `result` | Final report text. | `0` done, `1` error, `2` still running |
+| `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. The prompt comes from the positional argument, from `--prompt-file FILE` / `-f FILE`, or from stdin (`-`, or no prompt argument on a non-interactive stdin); use the file/stdin forms for anything multi-line. `--detach` returns instantly. `--read-only` pins the job to the Harness's read-only file policy, so it cannot modify a file; `--allow-git-write` lifts the git write guard instead, and the two are mutually exclusive. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. `--review-repo DIR` runs the Jev pre-screen on the clone's diff when the job settles — see "Jev judgments (optional)". | `0` |
+| `status` | Job state, session id, elapsed time; `--log` adds the worker log. Adds a `jev review  <state>` line when the job has a `--review-repo` clone. | `0` |
+| `result` | Final report text, then the stored Jev block when the job has a `--review-repo` clone (computing it on demand once if the worker died first). `--jev-exit` exits `3` when the review flagged. | `0` done, `1` error, `2` still running, `3` with `--jev-exit` and a flagged review |
 | `guard` | The job's git write guard state, plus any refs a guarded push landed in the sandbox instead of the real remote. | `0` |
 | `update` | Relays new information to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
 | `resume` | Continues a finished, failed, or interrupted job's DeepSeek session in a **new** job through ACP `session/resume`: same session id, conversation history, `cwd`, git write guard, and file policy. The first turn tells the agent its run was interrupted, to re-check the workspace for partial edits, and to finish the original task; trailing text is appended as extra instructions. Refuses a job that is still active (worker alive) or never recorded a session id; `--session ID --cwd DIR` resumes a session found with `sessions` that has no job record. The new job records `resumeOf`, the original `resumedBy`. | `0` launched, `1` refused |
-| `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
+| `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. When the job has a `--review-repo` clone it waits up to `AUTO_REVIEW_TIMEOUT_MS` (180000 ms) for the in-flight review before printing the block. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
 | `list` | Recent jobs, newest first; `--all` for every job. | `0` |
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
@@ -289,7 +289,9 @@ Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-conf
 `--prompt-file FILE` / `-f FILE` (for `start`), `--label NAME`, `--permission allow|reject`,
 `--allow-git-write`, `--read-only`, `--timeout-ms N`,
 `--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`),
-`--jev-lint` (run the optional, UNVALIDATED Jev lint before a `start`).
+`--jev-lint` (run the optional, UNVALIDATED Jev lint before a `start`),
+`--review-repo DIR` / `--review-base REV` / `--no-jev-review` (optional auto-review on `start`/`resume`),
+`--jev-exit` and `--no-jev-review` (on `result`/`wait`).
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
 shows for it: an idle row under the project folder, never live progress. Jobs are detached: they keep running after the launching session ends.
@@ -448,6 +450,38 @@ overrides the endpoint (tests use a local stub).
 export TYPESAFE_API_KEY=<key>          # or TYPESAFE_AI_API
 OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
 ```
+
+**Auto-review on start (the default screen).** `start --review-repo DIR` points at the clone the
+job changes. The runner resolves `DIR` to its git work-tree root and stores that plus the commit it
+started from (`--review-base REV`, default `HEAD`, taken before the worker spawns). When the job
+settles the worker runs the same `jev review` in-process, writes `<jobId>.jev-review.json`, and
+records `jevReview` on the job. `result` and `wait` then append the block, so every result arrives
+pre-screened:
+
+```
+--- jev review (pre-screen; the orchestrator still reviews every diff) ---
+3f2a1b0  flagged  P(none)=0.200  chosen h0 a.txt @@ -1,3 +1,3 @@
+look here: a.txt @@ -1,3 +1,3 @@ in_scope=0.120
+report: scratch/dsh-offload/jobs/<jobId>.jev-review.json
+```
+
+- `--review-repo DIR` must be the clone or worktree the job changes; its **untracked files are
+  reviewed too**, so never point it at a shared tree you do not want judged. There is deliberately
+  no `--cwd` fallback (a job usually changes a separate clone). `DSH_OFFLOAD_REVIEW_REPO=DIR` sets
+  the default; `--no-jev-review` disables auto-review for one job even when the env var is set. A
+  `DIR` that is not a git work tree warns once and starts the job without auto-review — a bad
+  target never blocks a start.
+- `resume` copies `reviewRepo`/`reviewBase` from the job it resumes (the base stays the original
+  start commit) unless it passes its own `--review-repo`/`--review-base`.
+- **The block is a look-here list, not an approval.** Read the diff and sign off yourself.
+- Exit codes of `result`/`wait` are unchanged; add `--jev-exit` to exit `3` when the review flagged.
+  `--no-jev-review` on `result`/`wait` suppresses the block. `--json` carries a `jevReview` field
+  instead of the text block.
+- With no key the block degrades to `jev review: disabled — set TYPESAFE_API_KEY` and
+  `jevReview.state = 'disabled'`; no request is made. A review that fails or times out (bounded by
+  `AUTO_REVIEW_TIMEOUT_MS`, 180000 ms) records `jevReview.state = 'error'` and never changes the
+  job's own state or exit code. `status` prints one `jev review  <state>` line when the job has a
+  review clone.
 
 **`jev review` — diff scope pre-screen (measured).** Reviews a job's diff against its work order
 (grouped one request per commit plus one for untracked files), and writes

@@ -326,7 +326,12 @@ triage (`jev watch`). Set the key once in the environment — never in a job pro
 export TYPESAFE_API_KEY=<key>        # or the workspace TYPESAFE_AI_API
 # export TYPESAFE_API_URL=https://api.typesafe.ai/v1/systemone   # override for a stub/proxy
 # export DSH_OFFLOAD_JEV_LINT=1      # run the lint on every start by default
+# export DSH_OFFLOAD_REVIEW_REPO=DIR # default for start/resume --review-repo
 ```
+
+Pass `start --review-repo <the clone the job changes>` (or resume it) and the review runs
+automatically when the job settles, so `result`/`wait` print the look-here block — that clone's
+untracked files are reviewed too.
 
 With no key every jev command prints one line (`jev: disabled — set TYPESAFE_API_KEY`) and exits 0,
 and no other command changes. The key is never printed, logged, or persisted. Jev is a pre-screen,

@@ -159,7 +159,9 @@ With a `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`) in the environment, three optio
 subcommands add judgments around a delegation: `jev review` pre-screens a job's diff against its
 work order and exits `3` when it wants a closer look, `jev lint` gives an advisory work-order
 check (`start --jev-lint` runs it automatically), and `jev watch` triages a running job's progress
-and exits `4` on a problem. Without a key every jev feature is skipped with one line, and no other
+and exits `4` on a problem. `start --review-repo <the clone the job changes>` runs that same review
+automatically when the job settles, so `result` and `wait` arrive with the look-here block already
+attached. Without a key every jev feature is skipped with one line, and no other
 command changes behaviour. Jev never approves anything — it is a pre-screen, and the orchestrator
 still reviews every diff. Full contract, measured numbers, and exit codes:
 [SKILL.md § Jev judgments (optional)](.agents/skills/deepseek-offload/SKILL.md#jev-judgments-optional).
