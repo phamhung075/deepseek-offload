@@ -181,9 +181,13 @@ export function applyIgnorePaths(groups, ignorePaths) {
 }
 
 // A path token in the work order: word-ish characters plus the separators a
-// repo path uses, with an optional leading `/` for an absolute path. Backticks
-// and trailing punctuation are not part of the token.
-const NAMED_TOKEN_RE = /\/?[A-Za-z0-9_@][A-Za-z0-9_@./~:+-]*/g
+// repo path uses, with an optional leading `/` for an absolute path. A token
+// may also start with `./` (normalised away later) or with a single `.` followed
+// by a name character, so dot-directories and dotfiles (`.agents/`, `.github/`,
+// `.env`) are captured. The lookbehind stops a match from beginning inside a
+// `..`-relative segment (`../foo`) or another token, so bare `.`/`..`/`...` are
+// never matched. Backticks and trailing punctuation are not part of the token.
+const NAMED_TOKEN_RE = /(?<![A-Za-z0-9_@./~:+-])(?:\/?(?:\.\/)?[A-Za-z0-9_@][A-Za-z0-9_@./~:+-]*|\/?\.[A-Za-z0-9_@][A-Za-z0-9_@./~:+-]*)/g
 const CITATION_SUFFIX_RE = /:~?\d+(?:-~?\d+)?$/
 const TRAILING_PUNCTUATION_RE = /[.,;:)\]}>'"]+$/
 const FILE_EXTENSION_RE = /\.[A-Za-z0-9]{1,10}$/
@@ -228,9 +232,19 @@ export function extractNamedPaths(workOrder, repo) {
   return out
 }
 
-function isUnderNamedPath(file, named) {
+/**
+ * Whether a hunk file is covered by a named path. A name with `/` keeps prefix
+ * semantics (the path itself or anything under it); a bare file name without
+ * `/` matches a hunk whose basename equals it at any depth.
+ */
+export function isUnderNamedPath(file, named) {
+  const base = String(file ?? '').split('/').pop() ?? ''
   for (const { value } of named) {
-    if (file === value || file.startsWith(`${value}/`)) return true
+    if (value.includes('/')) {
+      if (file === value || file.startsWith(`${value}/`)) return true
+    } else if (base === value) {
+      return true
+    }
   }
   return false
 }

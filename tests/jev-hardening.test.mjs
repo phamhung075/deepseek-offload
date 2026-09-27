@@ -15,7 +15,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { globMatch, extractNamedPaths, isTestSibling } from '../.agents/skills/deepseek-offload/scripts/jev/rules.mjs'
+import { globMatch, extractNamedPaths, isTestSibling, isUnderNamedPath } from '../.agents/skills/deepseek-offload/scripts/jev/rules.mjs'
 import { extractClaims } from '../.agents/skills/deepseek-offload/scripts/jev/claims.mjs'
 import { TRIAGE_RULES, matchRule } from '../.agents/skills/deepseek-offload/scripts/jev/triage.mjs'
 import { summarizeLog, minPNone } from '../.agents/skills/deepseek-offload/scripts/jev/decide.mjs'
@@ -55,6 +55,29 @@ test('named-path extraction strips citations, backticks, punctuation and absolut
   assert.equal(isTestSibling('pkg/a.test.ts'), true)
   assert.equal(isTestSibling('tests/helper.go'), true)
   assert.equal(isTestSibling('pkg/a.go'), false)
+})
+
+test('named-path extraction keeps dot-directories, drops bare dots, and scopes bare file names', () => {
+  const workOrder = 'Docs only: README.md, INSTALL.md, .agents/skills/deepseek-offload/SKILL.md, a NEW .agents/mcp-jev/README.md, and usage() in dsh-offload.mjs or scripts/jev/cli.mjs'
+  const named = extractNamedPaths(workOrder, process.cwd())
+  assert.deepEqual(named.map((entry) => entry.value).sort(), [
+    '.agents/mcp-jev/README.md',
+    '.agents/skills/deepseek-offload/SKILL.md',
+    'INSTALL.md',
+    'README.md',
+    'dsh-offload.mjs',
+    'scripts/jev/cli.mjs',
+  ].sort())
+
+  const bare = extractNamedPaths('touch dsh-offload.mjs only', process.cwd())
+  assert.equal(isUnderNamedPath('.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', bare), true, 'a bare file name matches its basename at any depth')
+  assert.equal(isUnderNamedPath('scripts/jev/cli.mjs', named), true, 'a named path with a slash keeps prefix semantics')
+  assert.equal(isUnderNamedPath('docs/other.md', named), false)
+
+  assert.deepEqual(
+    extractNamedPaths('ignore .. and ... but keep ./notes.md and .env here', process.cwd()).map((entry) => entry.value),
+    ['notes.md', '.env'],
+  )
 })
 
 test('citation extraction handles path:line, path:~line and path:line-line', () => {

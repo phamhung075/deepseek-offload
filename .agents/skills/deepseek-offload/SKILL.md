@@ -586,9 +586,12 @@ zero requests). Config is `<projectRoot>/.agents/jev.json` (override the path wi
 - `neverTouch` — any hunk whose file matches a glob (`**`, `*`, `?`; a slash-free pattern also matches
   the basename) is a `flag` finding, "never-touch path".
 - `pathScope` — `off` | `warn` (default) | `flag`. Code extracts the repo-relative paths the work
-  order names (tokens containing `/` or a file extension, with citations, backticks and absolute
-  paths normalized) and reports every hunk outside them as "outside paths named in the work order";
-  sibling test files (`*_test.go`, `*.test.*`, `tests/`) are allowed. `warn` lists the finding,
+  order names (tokens containing `/` or a file extension, including dot-directories and dotfiles such
+  as `.agents/` and `.env`, with citations, backticks and absolute paths normalized) and reports every
+  hunk outside them as "outside paths named in the work order". A named path without a `/` (a bare
+  file name such as `README.md` or `dsh-offload.mjs`) matches a hunk whose basename equals it at any
+  depth; a named path with a `/` keeps prefix semantics (that path and everything under it). Sibling
+  test files (`*_test.go`, `*.test.*`, `tests/`) are allowed. `warn` lists the finding,
   `flag` also flags the review. When the work order names no paths the rule is skipped and says so.
 - `ignorePaths` — matching files are skipped by the review entirely.
 
