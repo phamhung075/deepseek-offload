@@ -319,13 +319,18 @@ node "$R" start "<task>" --mcp-config "$PWD/.mcp.json" --label <name>
 ### Optional — TypeSafe Jev judgments
 
 Jev is off unless a key is exported in the shell that runs the runner. It adds an optional diff
-pre-screen (`jev review`), work-order lint (`jev lint`, and `start --jev-lint`), and progress
-triage (`jev watch`). Set the key once in the environment — never in a job prompt or a config file:
+pre-screen (`jev review`, with code-enforced `neverTouch`/`pathScope`/`ignorePaths` hard rules from
+`.agents/jev.json`), report claim checking (`jev claims`), work-order lint (`jev lint`, and
+`start --jev-lint`), progress triage (`jev watch`, and `wait --jev-watch` early return), failure
+triage (`jev triage`), and a local decision log (`jev decide` / `jev log`). Set the key once in the
+environment — never in a job prompt or a config file:
 
 ```sh
 export TYPESAFE_API_KEY=<key>        # or the workspace TYPESAFE_AI_API
 # export TYPESAFE_API_URL=https://api.typesafe.ai/v1/systemone   # override for a stub/proxy
 # export DSH_OFFLOAD_JEV_LINT=1      # run the lint on every start by default
+# export DSH_OFFLOAD_JEV_WATCH=1     # enable wait --jev-watch by default
+# export DSH_OFFLOAD_JEV_CONFIG=PATH # override <projectRoot>/.agents/jev.json
 # export DSH_OFFLOAD_REVIEW_REPO=DIR # default for start/resume --review-repo
 ```
 

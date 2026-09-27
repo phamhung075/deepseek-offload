@@ -155,15 +155,19 @@ reads it from a file, which avoids shell backtick expansion.
 
 ## Optional TypeSafe Jev pre-screen
 
-With a `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`) in the environment, three optional `jev`
-subcommands add judgments around a delegation: `jev review` pre-screens a job's diff against its
-work order and exits `3` when it wants a closer look, `jev lint` gives an advisory work-order
-check (`start --jev-lint` runs it automatically), and `jev watch` triages a running job's progress
-and exits `4` on a problem. `start --review-repo <the clone the job changes>` runs that same review
-automatically when the job settles, so `result` and `wait` arrive with the look-here block already
-attached. Without a key every jev feature is skipped with one line, and no other
-command changes behaviour. Jev never approves anything — it is a pre-screen, and the orchestrator
-still reviews every diff. Full contract, measured numbers, and exit codes:
+With a `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`) in the environment, the optional `jev`
+subcommands add judgments around a delegation: `jev review` first applies code-enforced hard rules
+(`neverTouch` / `pathScope` / `ignorePaths` from `.agents/jev.json`) and then pre-screens a job's diff
+against its work order, exiting `3` when it wants a closer look; `jev claims` checks the report's
+`path:line` claims against ±6 evidence lines; `jev lint` gives an advisory work-order check
+(`start --jev-lint` runs it automatically); `jev watch` triages a running job's progress and exits
+`4` on a problem, and `wait --jev-watch` reuses it for an early return; `jev decide`/`jev log` record
+accept/reject/partial labels so the thresholds can be measured on real data. `start --review-repo <the
+clone the job changes>` runs that same review automatically when the job settles, so `result` and
+`wait` arrive with the look-here block already attached. `jev triage` reports the failure kind for an
+errored job. Without a key every jev feature is skipped with one line, and no other command changes
+behaviour. Jev never approves anything — it is a pre-screen, and the orchestrator still reviews every
+diff. Full contract, measured numbers, and exit codes:
 [SKILL.md § Jev judgments (optional)](.agents/skills/deepseek-offload/SKILL.md#jev-judgments-optional).
 
 ## Why jobs land under a project folder (and used to land in "Ungrouped")
