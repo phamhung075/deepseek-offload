@@ -52,7 +52,7 @@ const MCP_SKIP_NAMES = new Set(
 )
 
 const SERVER_NAME = 'deepseek-mcp'
-const SERVER_VERSION = '0.2.0'
+const SERVER_VERSION = '0.3.0'
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -699,21 +699,21 @@ class AcpClient {
 /**
  * Run one operation against a fresh ACP child.
  * @param permission - permission policy passed to the child.
- * @param fn - operation receiving the initialized client.
+ * @param fn - operation receiving the initialized client and the agent's `initialize` result.
  * @param options - `env` merged into the child's environment.
  * @returns whatever `fn` returns.
  */
 async function withAcp(permission, fn, options = {}) {
   const client = new AcpClient(permission, options)
   try {
-    await client.request('initialize', { protocolVersion: 1, clientCapabilities: {} }, 60000)
-    return await fn(client)
+    const initialized = await client.request('initialize', { protocolVersion: 1, clientCapabilities: {} }, 60000)
+    return await fn(client, initialized)
   } finally {
     await client.dispose()
   }
 }
 
-async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath }) {
+async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, resumeSessionId }) {
   const startedAt = Date.now()
   // Resolve before spawning ACP so a broken MCP config fails loud, not mid-turn.
   const resolvedMcp = mcpConfigPath ? resolveMcpServers(mcpConfigPath) : null
@@ -725,11 +725,16 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
   return withAcp(PERMISSION, async (client) => {
     client.onText = (text) => { if (onProgress) onProgress(text) }
 
-    const { sessionId } = await client.request(
-      'session/new',
-      { cwd, mcpServers: resolvedMcp === null ? [] : resolvedMcp.servers },
-      60000,
-    )
+    const mcpServers = resolvedMcp === null ? [] : resolvedMcp.servers
+    // session/resume restores a persisted, inactive session's history without
+    // replaying its old updates, so collectedText holds only the new turns.
+    let sessionId
+    if (resumeSessionId) {
+      await client.request('session/resume', { sessionId: resumeSessionId, cwd, mcpServers }, 60000)
+      sessionId = resumeSessionId
+    } else {
+      ({ sessionId } = await client.request('session/new', { cwd, mcpServers }, 60000))
+    }
     // A distinct, unthrottled announcement — not routed through onProgress's char-count
     // heartbeat, which a short "session <id>" string almost never crosses the threshold
     // for — so a caller can reliably capture the id while the call is still in flight.
@@ -836,6 +841,13 @@ const TOOLS = [
             'Its servers are mounted into the DeepSeek session, so the child can call tools like ' +
             'mcp__docs__extract_document. Defaults to DEEPSEEK_MCP_CONFIG when that is set.',
         },
+        resumeSessionId: {
+          type: 'string',
+          description:
+            'Optional id of a persisted DeepSeek session to continue instead of starting a fresh one, e.g. a ' +
+            'session whose run was interrupted. The session keeps its conversation history, must not be running ' +
+            'in any other process, and cwd must be the directory it was created in. The prompt becomes its next turn.',
+        },
       },
       required: ['prompt'],
     },
@@ -938,8 +950,11 @@ async function handleToolsCall(id, params) {
       }
       notifyProgress(progressToken, 0, `Starting DeepSeek agent in ${cwd}…`)
       const onSessionId = (sid) => notifyProgress(progressToken, 0, `session=${sid}`)
+      const resumeSessionId = typeof args.resumeSessionId === 'string' && args.resumeSessionId.trim() !== ''
+        ? args.resumeSessionId.trim()
+        : undefined
 
-      const out = await runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath })
+      const out = await runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, resumeSessionId })
 
       const header = [
         `DeepSeek agent finished (stopReason=${out.stopReason}, ${out.elapsedMs}ms, session=${out.sessionId})`,
@@ -1102,4 +1117,29 @@ function start() {
   log(`${SERVER_NAME} v${SERVER_VERSION} ready (DSH_HOME=${DSH_HOME}, permission=${PERMISSION})`)
 }
 
-start()
+/**
+ * `--probe`: print this bridge's version, its tools' input names, and the ACP
+ * agent's `initialize` result as one JSON line, then exit. `doctor` uses it to
+ * tell an outdated bridge or Harness apart from a current one without a model turn.
+ */
+async function probe() {
+  const report = {
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+    tools: TOOLS.map((tool) => ({ name: tool.name, inputs: Object.keys(tool.inputSchema.properties || {}) })),
+    acp: null,
+    acpError: null,
+  }
+  try {
+    report.acp = await withAcp(PERMISSION, async (_client, initialized) => initialized)
+  } catch (err) {
+    report.acpError = err && err.message ? err.message : String(err)
+  }
+  process.stdout.write(`${JSON.stringify(report)}\n`)
+}
+
+if (process.argv.includes('--probe')) {
+  probe().then(() => process.exit(0))
+} else {
+  start()
+}

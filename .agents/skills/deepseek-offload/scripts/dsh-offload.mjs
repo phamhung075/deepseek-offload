@@ -22,6 +22,7 @@
  *   node dsh-offload.mjs start "<self-contained prompt>" [--cwd DIR] [--label NAME] [--defer-to-off-peak]
  *   node dsh-offload.mjs start --prompt-file FILE|-f FILE   # read the prompt from a file
  *   node dsh-offload.mjs start -                          # read the prompt from stdin
+ *   node dsh-offload.mjs resume <jobId> ["<extra instructions>"] | resume --session ID --cwd DIR
  *   node dsh-offload.mjs status <jobId>
  *   node dsh-offload.mjs result <jobId>
  *   node dsh-offload.mjs wait   <jobId> [--timeout-ms N]
@@ -135,18 +136,27 @@ function readJob(jobId) {
 function reconcileJob(job) {
   if (!isActiveState(job.state)) return job
   if (typeof job.pid !== 'number') return job
-  let alive = true
-  try {
-    process.kill(job.pid, 0)
-  } catch (error) {
-    alive = error.code === 'EPERM'
-  }
-  if (alive) return job
+  if (workerAlive(job)) return job
   return updateJob(job.jobId, {
     state: 'error',
     error: `worker process ${job.pid} is gone; see ${path.basename(workerLogFile(job.jobId))}`,
     finishedAt: Date.now(),
   })
+}
+
+/**
+ * Whether a job's worker process still exists.
+ * @param job - job record read from disk.
+ * @returns false when the record has no pid or the pid is gone.
+ */
+function workerAlive(job) {
+  if (typeof job.pid !== 'number') return false
+  try {
+    process.kill(job.pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
 }
 
 function updateJob(jobId, patch) {
@@ -874,17 +884,16 @@ async function runWorker(jobId) {
     updateServer = await startUpdateSocket(jobId, bridge)
     updateJob(jobId, { state: 'running', workerStartedAt: Date.now() })
 
-    const before = new Set(await fetchSessions(bridge, job.cwd).catch(() => []))
-    updateJob(jobId, { knownSessions: before.size })
+    // A resumed job already knows its session, so there is nothing to discover.
+    const resumeSessionId = typeof job.resumeSessionId === 'string' ? job.resumeSessionId : null
+    const before = resumeSessionId === null ? new Set(await fetchSessions(bridge, job.cwd).catch(() => [])) : new Set()
+    if (resumeSessionId === null) updateJob(jobId, { knownSessions: before.size })
 
+    const agentArgs = { prompt: job.prompt, cwd: job.cwd }
+    if (job.mcpConfig !== null && job.mcpConfig !== undefined) agentArgs.mcpConfig = job.mcpConfig
+    if (resumeSessionId !== null) agentArgs.resumeSessionId = resumeSessionId
     const agentCall = bridge
-      .callTool(
-        'deepseek_agent',
-        job.mcpConfig === null || job.mcpConfig === undefined
-          ? { prompt: job.prompt, cwd: job.cwd }
-          : { prompt: job.prompt, cwd: job.cwd, mcpConfig: job.mcpConfig },
-        { timeoutMs: job.timeoutMs + 120_000, progressToken: 'dsh-offload' },
-      )
+      .callTool('deepseek_agent', agentArgs, { timeoutMs: job.timeoutMs + 120_000, progressToken: 'dsh-offload' })
       // An MCP-level failure arrives as a successful result carrying isError:
       // without this check a dead job would be recorded as a finished one, with
       // the error text handed back as if it were an answer.
@@ -896,7 +905,7 @@ async function runWorker(jobId) {
     // Discover the new session id while the agent works, so the caller can be
     // sent to the web GUI before the job finishes.
     const discoveryDeadline = Date.now() + SESSION_DISCOVERY_TIMEOUT_MS
-    let discovered = null
+    let discovered = resumeSessionId
     while (Date.now() < discoveryDeadline) {
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
       if (discovered === null) {
@@ -986,6 +995,8 @@ function describeJob(job, { full = false } = {}) {
     `session   ${job.sessionId || '(discovering…)'}`,
     `started   ${new Date(job.startedAt).toISOString()}  elapsed=${humanDuration((job.finishedAt || Date.now()) - job.startedAt)}`,
   ]
+  if (job.resumeOf) lines.push(`resumes   ${job.resumeOf} (same session)`)
+  if (job.resumedBy) lines.push(`resumed   by ${job.resumedBy}`)
   if (job.updateCount) lines.push(`updates   ${job.updateCount} (last ${new Date(job.lastUpdateAt).toISOString()})`)
   if (typeof job.deferredUntil === 'number' && job.state === 'scheduled') {
     const remaining = job.deferredUntil - Date.now()
@@ -1006,6 +1017,26 @@ function describeJob(job, { full = false } = {}) {
   lines.push(`gui       ${GUI_URL}  → session list for ${job.cwd} (row stays idle while the job runs)`)
   if (!full && job.sessionId) lines.push('', `next      dsh-offload result ${job.jobId}`)
   return lines.join('\n')
+}
+
+/**
+ * Persist a new job record and spawn its detached worker.
+ * @param record - the complete job record, in state `starting`.
+ */
+function launchWorker(record) {
+  const { jobId } = record
+  writeJsonAtomic(jobFile(jobId), record)
+  const log = fs.openSync(workerLogFile(jobId), 'a')
+  const worker = spawn(process.execPath, [fileURLToPath(import.meta.url), '__run', jobId], {
+    cwd: PROJECT_ROOT,
+    env: process.env,
+    detached: true,
+    stdio: ['ignore', log, log],
+  })
+  worker.unref()
+  fs.closeSync(log)
+  const state = typeof record.deferredUntil === 'number' ? 'scheduled' : 'running'
+  writeJsonAtomic(jobFile(jobId), { ...record, state, pid: worker.pid })
 }
 
 async function commandStart(positional, flags) {
@@ -1072,18 +1103,7 @@ async function commandStart(positional, flags) {
     bridge: path.relative(PROJECT_ROOT, BRIDGE_SERVER),
     ...(deferredUntil === null ? {} : { deferredUntil }),
   }
-  writeJsonAtomic(jobFile(jobId), record)
-
-  const log = fs.openSync(workerLogFile(jobId), 'a')
-  const worker = spawn(process.execPath, [fileURLToPath(import.meta.url), '__run', jobId], {
-    cwd: PROJECT_ROOT,
-    env: process.env,
-    detached: true,
-    stdio: ['ignore', log, log],
-  })
-  worker.unref()
-  fs.closeSync(log)
-  writeJsonAtomic(jobFile(jobId), { ...record, state: deferredUntil === null ? 'running' : 'scheduled', pid: worker.pid })
+  launchWorker(record)
 
   if (deferredUntil !== null) {
     const job = readJob(jobId)
@@ -1122,6 +1142,129 @@ async function commandStart(positional, flags) {
       + `          the job keeps running in the background regardless.\n`,
     )
   }
+  return 0
+}
+
+/**
+ * The first turn of a resumed session. The session log restores the earlier
+ * conversation, but not what the interruption cut off, so the agent has to
+ * re-check the workspace before continuing.
+ */
+const RESUME_PROMPT = [
+  'Your previous run in this session was interrupted before it finished (the controlling process stopped).',
+  'The conversation above is intact, but the last tool call may not have completed and files may be partially edited.',
+  'First inspect the current state of the workspace for the files you were working on, then continue the original task from where it stopped.',
+  'Do not redo steps that are already complete. When the task is done, give the final report the original task asked for, covering the whole task, not only this continuation.',
+].join('\n')
+
+/**
+ * Continue an interrupted job's DeepSeek session in a new background job.
+ * The new job reuses the original job's cwd and policies, so ACP's cwd check
+ * and the git/file guards match the first run.
+ * @param positional - `[jobId, ...extraInstructionWords]`, or only the extra
+ *   instructions when `--session` names the session directly.
+ * @param flags - `--session ID --cwd DIR` for a session with no job record,
+ *   plus `--label`, `--timeout-ms`, `--read-only`, `--allow-git-write`, `--mcp-config`, `--json`.
+ * @returns process exit code.
+ */
+async function commandResume(positional, flags) {
+  ensureDirs()
+  if (!fs.existsSync(BRIDGE_SERVER)) fail(`bridge server not found: ${BRIDGE_SERVER}`)
+  let source = null
+  let extra
+  let sessionId
+  let base
+  if (typeof flags.session === 'string') {
+    const cwd = typeof flags.cwd === 'string' ? flags.cwd : DEFAULT_CWD
+    if (!isAbsolutePath(cwd)) fail(`--cwd must be absolute: ${cwd}`)
+    if (!fs.existsSync(cwd)) fail(`--cwd does not exist: ${cwd}`)
+    sessionId = flags.session
+    extra = positional.join(' ').trim()
+    base = {
+      label: null,
+      cwd,
+      mcpConfig: process.env.DEEPSEEK_MCP_CONFIG || null,
+      permission: DEFAULT_PERMISSION,
+      allowGitWrite: false,
+      readOnly: false,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+    }
+  } else {
+    const jobId = positional[0]
+    if (jobId === undefined) fail('resume requires a job id: dsh-offload resume <jobId> ["<extra instructions>"] (or --session ID --cwd DIR)')
+    source = reconcileJob(readJob(jobId))
+    if (isActiveState(source.state)) {
+      fail(`job ${jobId} is still ${source.state} — steer it with \`update\`, or \`cancel\` it before resuming`)
+    }
+    if (!source.sessionId) {
+      fail(`job ${jobId} never recorded a session id, so there is nothing to resume — `
+        + `find it with \`sessions --cwd ${source.cwd}\`, then \`resume --session <id> --cwd ${source.cwd}\``)
+    }
+    sessionId = source.sessionId
+    extra = positional.slice(1).join(' ').trim()
+    base = source
+  }
+
+  // Two processes holding one session would interleave writes to its log.
+  for (const id of listJobIds()) {
+    let other
+    try {
+      other = readJob(id)
+    } catch {
+      continue
+    }
+    if (other.sessionId === sessionId && isActiveState(reconcileJob(other).state)) {
+      fail(`session ${sessionId} is still held by job ${id} (worker pid ${other.pid}) — \`cancel ${id}\` first`)
+    }
+  }
+
+  if (flags['read-only'] === true && flags['allow-git-write'] === true) {
+    fail('--read-only and --allow-git-write contradict each other: read-only denies the file writes a commit needs')
+  }
+  const readOnly = flags['read-only'] === true || (base.readOnly === true && flags['allow-git-write'] !== true)
+  const allowGitWrite = flags['allow-git-write'] === true || (base.allowGitWrite === true && flags['read-only'] !== true)
+  let mcpConfig = typeof flags['mcp-config'] === 'string' ? flags['mcp-config'] : base.mcpConfig
+  if (mcpConfig !== null && mcpConfig !== undefined && mcpConfig !== '') {
+    if (!isAbsolutePath(mcpConfig) || !fs.existsSync(mcpConfig)) fail(`--mcp-config must be an existing absolute path: ${mcpConfig}`)
+  } else {
+    mcpConfig = null
+  }
+
+  const now = Date.now()
+  const jobId = newJobId()
+  const baseLabel = typeof flags.label === 'string' ? flags.label : base.label
+  const record = {
+    jobId,
+    label: baseLabel ? `${baseLabel} (resumed)` : null,
+    state: 'starting',
+    prompt: extra === '' ? RESUME_PROMPT : `${RESUME_PROMPT}\n\nAdditional instructions for this continuation:\n${extra}`,
+    cwd: base.cwd,
+    mcpConfig,
+    permission: base.permission ?? DEFAULT_PERMISSION,
+    allowGitWrite,
+    readOnly,
+    timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : (base.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    resumeOf: source === null ? null : source.jobId,
+    resumeSessionId: sessionId,
+    sessionId,
+    startedAt: now,
+    finishedAt: null,
+    elapsedMs: null,
+    stopReason: null,
+    error: null,
+    progressChars: 0,
+    host: `${process.platform} ${process.arch}`,
+    bridge: path.relative(PROJECT_ROOT, BRIDGE_SERVER),
+  }
+  launchWorker(record)
+  if (source !== null) updateJob(source.jobId, { resumedBy: jobId })
+
+  const job = readJob(jobId)
+  if (flags.json === true) {
+    print({ ...job, resultFile: null, followCommand: followCommand(jobId) }, true)
+    return 0
+  }
+  process.stdout.write(`${describeJob(job)}\n`)
   return 0
 }
 
@@ -1632,6 +1775,75 @@ function hasOrchestratorRule(text) {
 }
 
 /**
+ * Run a bridge's `--probe` mode.
+ * @param serverPath - the bridge's `server.cjs`.
+ * @returns the probe report, or null when that bridge has no `--probe` (it then
+ *   starts its stdio server, sees stdin closed, and exits without a report).
+ */
+function probeBridge(serverPath) {
+  const out = spawnSync(process.execPath, [serverPath, '--probe'], {
+    cwd: PROJECT_ROOT,
+    env: process.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 120_000,
+  })
+  const line = (out.stdout || '').trim().split('\n').pop()
+  try {
+    return JSON.parse(line)
+  } catch {
+    return null
+  }
+}
+
+/** Package files the installer links into a project, relative to both roots. */
+const PROJECT_CODE_ENTRIES = [
+  path.join('.agents', 'mcp-deepseek', 'server.cjs'),
+  path.join('.agents', 'mcp-deepseek', 'git-guard.cjs'),
+  path.join('.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs'),
+  path.join('.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs'),
+]
+
+/**
+ * Project entries whose contents differ from this package's files: the project
+ * entries the installer created, plus the bridge path each agent MCP config names.
+ * A missing entry is not stale; `--no-project-links` leaves entries absent.
+ * @param project - absolute project directory.
+ * @returns project-relative (or absolute, outside the project) paths that are stale.
+ */
+function staleProjectEntries(project) {
+  const packageRoot = path.dirname(AGENTS_ROOT)
+  const same = (a, b) => {
+    try {
+      return fs.realpathSync(a) === fs.realpathSync(b) || fs.readFileSync(a).equals(fs.readFileSync(b))
+    } catch {
+      return true
+    }
+  }
+  const pairs = path.resolve(project) === path.resolve(packageRoot)
+    ? []
+    : PROJECT_CODE_ENTRIES.map((rel) => [path.join(project, rel), path.join(packageRoot, rel)])
+  for (const config of [path.join(project, '.mcp.json'), path.join(project, '.agents', 'mcp_config.json')]) {
+    let server
+    try {
+      server = JSON.parse(fs.readFileSync(config, 'utf8'))?.mcpServers?.deepseek
+    } catch {
+      continue
+    }
+    const script = (server?.args ?? []).find((arg) => typeof arg === 'string' && arg.endsWith('server.cjs'))
+    if (script !== undefined) pairs.push([path.resolve(project, script), BRIDGE_SERVER])
+  }
+  const stale = []
+  for (const [entry, source] of pairs) {
+    if (!fs.existsSync(entry) || same(entry, source)) continue
+    const relative = path.relative(project, entry)
+    const shown = relative.startsWith('..') || path.isAbsolute(relative) ? entry : relative
+    if (!stale.includes(shown)) stale.push(shown)
+  }
+  return stale
+}
+
+/**
  * Verify the toolchain prerequisites and the two facts that decide whether a
  * delegated session will be grouped under its project folder: the workspace
  * plugin must be answering, and the GUI must be running to answer at all.
@@ -1720,6 +1932,31 @@ async function commandDoctor(_positional, flags) {
     push('workspace grouping', true, `GUI not running — adoption requests queue in ${WORKSPACE_ATTACH_DIR} and are applied when \`dsh web\` starts`)
   }
 
+  // `resume` needs a bridge that forwards resumeSessionId and a Harness whose
+  // ACP agent advertises session/resume; the probe answers both without a model turn.
+  const probe = probeBridge(BRIDGE_SERVER)
+  const bridgeResume = probe?.tools?.find((tool) => tool.name === 'deepseek_agent')?.inputs?.includes('resumeSessionId') === true
+  push('bridge supports resume', bridgeResume, probe === null
+    ? `${BRIDGE_SERVER} predates --probe — update the package: install.sh --update`
+    : bridgeResume
+      ? `${probe.name} v${probe.version}`
+      : `${probe.name} v${probe.version} has no resumeSessionId — update the package: install.sh --update`)
+  const acpResume = probe?.acp?.agentCapabilities?.sessionCapabilities?.resume !== undefined
+  push('dsh acp session/resume', acpResume, probe === null
+    ? 'not probed (bridge predates --probe)'
+    : probe.acpError !== null
+      ? `dsh --profile acp did not initialize: ${probe.acpError}`
+      : acpResume
+        ? `${probe.acp.agentInfo?.name ?? 'acp agent'} ${probe.acp.agentInfo?.version ?? ''} advertises resume`.trim()
+        : 'the Harness ACP agent does not advertise session/resume — update the DeepSeek Harness checkout')
+
+  // A project entry that is a copy (or a link into another, older checkout)
+  // keeps running old code after the package is updated.
+  const stale = staleProjectEntries(PROJECT_ROOT)
+  push('project entries current', stale.length === 0, stale.length === 0
+    ? 'every project entry and MCP bridge path matches this package'
+    : `${stale.join(', ')} differ from this package — re-run install.sh --update`)
+
   // The orchestrator rule lives in the project's own instruction files; a
   // hand-written rule counts, so this only fails when the project has neither.
   const ruleFiles = orchestratorRuleFiles(PROJECT_ROOT)
@@ -1806,6 +2043,11 @@ function usage() {
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
+  resume <jobId> ["<extra>"]   continue an interrupted job's session in a new job
+                                 (same cwd, guards and history; the agent re-checks
+                                 the workspace first). --session ID --cwd DIR resumes
+                                 a session with no job record; --label --timeout-ms
+                                 --read-only --allow-git-write --mcp-config --json
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
   result <jobId> [--json]      final report text
   guard  <jobId> [--json]      git write guard state, and any refs the job pushed
@@ -1861,6 +2103,9 @@ async function main() {
     }
     case 'start':
       process.exitCode = await commandStart(positional, flags)
+      return
+    case 'resume':
+      process.exitCode = await commandResume(positional, flags)
       return
     case 'status':
       process.exitCode = commandStatus(positional, flags)

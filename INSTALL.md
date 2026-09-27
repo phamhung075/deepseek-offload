@@ -175,6 +175,9 @@ ok    model accepts images — model=deepseek-flash (declared in /…/.dsh/profi
 ok    job store writable — /…/<project>/scratch/dsh-offload/jobs
 ok    MCP config — DEEPSEEK_MCP_CONFIG unset — delegated jobs get no MCP tools
 ok    workspace grouping — plugin alive (pid 4242, 1s ago) — sessions join their project folder
+ok    bridge supports resume — deepseek-mcp v0.3.0
+ok    dsh acp session/resume — deepseek-harness-acp 0.0.1 advertises resume
+ok    project entries current — every project entry and MCP bridge path matches this package
 ok    orchestrator rule — /…/<project>/CLAUDE.md
 ```
 
@@ -187,6 +190,9 @@ Interpretation:
 | `model accepts images` | The pinned id is missing from the `acp` profile's model catalog, so jobs can still run but cannot read an image. Re-run `install.sh`: it rewrites the catalog row. Verify with a job that reads a PNG. |
 | `MCP config … no MCP tools` | Not an error: the child gets no MCP tools unless a job passes `--mcp-config`. Mention it, do not "fix" it. |
 | `workspace grouping` | The plugin is not loaded. Re-run `install.sh`; if the GUI was already running, reload its page. Only a GUI that is running *with* the row loaded reports alive. If you isolated `DSH_HOME` (a test install), this line fails by construction — the running GUI owns the real home. |
+| `bridge supports resume` | The package predates `resume` (the bridge has no `--probe`, or `deepseek_agent` lacks `resumeSessionId`). Update the package: see "Updating an existing project" below. |
+| `dsh acp session/resume` | The Harness ACP agent failed to start (the detail carries its error), or the Harness checkout predates `session/resume`. Update the Harness; `resume` cannot work until this line is `ok`. |
+| `project entries current` | A project entry or the bridge path in `.mcp.json` / `.agents/mcp_config.json` is a copy, or a link into another, older checkout. Run `install.sh --update`. |
 | `orchestrator rule` | No project instruction file carries the managed block. Re-run `install.sh` to insert it. A hand-written rule containing `THE DEEPSEEK HARNESS IS THE WORKER` also counts as ok; an install run with `--no-agent-rule` is expected to leave this line failing. |
 
 Then confirm the install is idempotent — the second run must change nothing:
@@ -273,9 +279,30 @@ Report only what you ran. If a phase failed, say which and stop there rather tha
 
 ---
 
+## Updating an existing project
+
+A project installed from an older package keeps running that package's runner and bridge until both the package checkout and the project entries move. `install.sh --update` does both: it fast-forwards the package's git checkout to its upstream (refusing local changes or diverged history), re-runs the new installer, and replaces stale project entries — a link into another checkout of this package, or a copied script, which it moves aside as `<name>.pre-update`. A regular `SKILL.md` or directory that differs is reported `stale` and kept, because it may be the project's own.
+
+A package from before `--update` exists cannot run it, so the first update fetches by hand:
+
+```sh
+git -C .agents/deepseek-offload fetch origin
+git -C .agents/deepseek-offload checkout --detach origin/main   # the package's default branch
+.agents/deepseek-offload/install.sh --update --no-fetch --with-mcp-config
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs doctor
+```
+
+Later updates are one command:
+
+```sh
+.agents/deepseek-offload/install.sh --update --with-mcp-config
+```
+
+Then commit the submodule pointer in the project (`git add .agents/deepseek-offload`), and restart any agent session that already runs the `deepseek` MCP server: it keeps the old bridge process until it restarts. Jobs a previous session left running with a dead worker can now be continued with `resume <jobId>`.
+
 ## Operating it afterwards
 
-The runner is the interface: `doctor`, `start`, `status`, `result`, `wait`, `update`, `cancel`,
+The runner is the interface: `doctor`, `start`, `status`, `result`, `wait`, `update`, `cancel`, `resume`,
 `list`, `sessions`, `sync-workspace`, `mcp-servers`, `window`. Running it with no arguments prints
 its own usage. The calling-agent guide — when to offload, prompt contracts, MCP forwarding, the
 per-command behaviour table — is

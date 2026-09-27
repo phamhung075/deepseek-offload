@@ -44,10 +44,12 @@ stream a transcript the job is still appending to. Both need
 
 | Tool | What it does |
 | :--- | :--- |
-| `deepseek_agent(prompt, cwd?, mcpConfig?)` | Runs one DeepSeek task in a fresh session; returns the final answer + session id. |
+| `deepseek_agent(prompt, cwd?, mcpConfig?, resumeSessionId?)` | Runs one DeepSeek task in a fresh session, or, with `resumeSessionId`, as the next turn of that persisted session (ACP `session/resume`; `cwd` must be its original directory); returns the final answer + session id. |
 | `deepseek_list_sessions(cwd?)` | Lists DeepSeek sessions from the shared store. |
 | `deepseek_mcp_servers(mcpConfig?)` | Resolves which MCP servers a delegation would receive, without running an agent. |
 | `deepseek_update_session(sessionId, message?)` | Steers or cancels a session that's still mid-turn in this bridge process: interrupts it (`session/cancel`), then re-prompts the same session with `message` if given (preserving history), or — if `message` is omitted — closes the session normally with no redirect (`stopReason=cancelled`). Errors if the session already finished. |
+
+`node server.cjs --probe` prints one JSON line — the bridge version, each tool's input names, and the `dsh --profile acp` agent's `initialize` result (or `acpError`) — then exits without running a model turn. The runner's `doctor` uses it to verify `resume` support; a bridge that predates `--probe` starts its stdio server instead and exits on closed stdin without printing a report.
 
 ## Forwarding MCP servers to the DeepSeek agent
 

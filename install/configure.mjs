@@ -22,13 +22,18 @@
  *    `standard` preset, so a session on a text-only model can still read images
  *    by delegating to the vision model.
  * 7. Verify — run the runner's `doctor`, which reports whether the workspace
- *    plugin is answering and where the GUI is.
+ *    plugin is answering, where the GUI is, whether the bridge and Harness
+ *    support `resume`, and whether every project entry matches this package.
+ *
+ * `--update` first fast-forwards this package's git checkout to its upstream and
+ * re-runs the new installer, which then replaces stale project entries: links
+ * into another checkout of this package, and copied scripts.
  *
  * Usage (normally through `install.sh`):
  *   node install/configure.mjs [--project DIR] [--dsh-root DIR] [--dsh-home DIR]
  *                              [--with-mcp-config] [--with-vision-subagent]
  *                              [--no-agent-rule] [--rule-file PATH]
- *                              [--dry-run] [--uninstall] [--json]
+ *                              [--update [--no-fetch]] [--dry-run] [--uninstall] [--json]
  *
  * The profile patches are user-owned files: this script edits their text and
  * never parses/re-emits YAML, so comments, `!!js` expressions, and unrelated
@@ -106,7 +111,14 @@ function main() {
   log(`dsh home   ${home}`)
   const launchKind = dshCommand(['--version'], dshRoot).kind
   log(`dsh        ${launchKind}${launchKind === 'source checkout' ? ` (${dshRoot})` : ''}`)
-  log(`mode       ${args.uninstall ? 'uninstall' : args['dry-run'] ? 'dry run' : 'install'}`)
+  log(`mode       ${args.uninstall ? 'uninstall' : args['dry-run'] ? 'dry run' : args.update === true ? 'update' : 'install'}`)
+
+  // The running process still holds the old installer, so a moved checkout
+  // re-runs itself once, from the new code, without fetching again.
+  if (args.update === true && args['no-fetch'] !== true && !args.uninstall && updatePackage()) {
+    const rerun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2), '--no-fetch'], { stdio: 'inherit' })
+    process.exit(rerun.status ?? 1)
+  }
 
   if (!fs.existsSync(BRIDGE) && !args.uninstall) {
     fail(`the package looks incomplete: ${BRIDGE} is missing`)
@@ -247,19 +259,41 @@ function wireProject(project) {
  * @param project - absolute project directory the link lives in.
  * @param link - absolute path inside the project.
  * @param target - absolute path inside the package.
+ * @param options - `update` replaces a stale link or copied script (default: `--update`).
  */
-function linkEntry(project, link, target) {
+function linkEntry(project, link, target, { update = args.update === true } = {}) {
   if (fs.existsSync(link) || isDanglingLink(link)) {
     const suffix = path.relative(PACKAGE_ROOT, target)
-    const satisfied = fs.existsSync(link)
+    const samePackage = fs.existsSync(link)
       && (fs.realpathSync(link) === fs.realpathSync(target)
         || fs.realpathSync(link).endsWith(`${path.sep}${suffix}`))
-    if (satisfied) {
+    if (samePackage && sameContent(link, target)) {
       log(`unchanged  ${link}`)
       return
     }
-    log(`kept       ${link} (already present; not overwritten)`)
-    return
+    // A link into another checkout of this package, or a copied script, keeps
+    // running old code once the package moves on; only `--update` replaces it.
+    // A regular SKILL.md or directory at that path may be the project's own.
+    const isLink = readlinkOrNull(link) !== null
+    const replaceable = samePackage && (isLink || /\.(c|m)?js$/.test(link))
+    if (!replaceable || !update) {
+      log(!samePackage
+        ? `kept       ${link} (already present; not overwritten)`
+        : replaceable
+          ? `stale      ${link} (differs from this package; re-run with --update to replace it)`
+          : `stale      ${link} (differs from this package; replace it by hand if it is not the project's own)`)
+      return
+    }
+    if (args['dry-run']) {
+      log(`would replace ${link} -> package`)
+      return
+    }
+    if (isLink) {
+      fs.rmSync(link, { force: true })
+    } else {
+      fs.renameSync(link, `${link}.pre-update`)
+      log(`moved      ${link} -> ${path.basename(link)}.pre-update`)
+    }
   }
   if (args['dry-run']) {
     log(`would link ${link} -> package`)
@@ -282,6 +316,69 @@ function linkEntry(project, link, target) {
     fs.cpSync(target, link, { recursive: true })
     log(`copied     ${link} (symlink unavailable: ${error.message})`)
   }
+}
+
+/**
+ * Whether two files or directory trees hold the same bytes.
+ * @param a - absolute path.
+ * @param b - absolute path.
+ * @returns true when both resolve to the same path or identical content.
+ */
+function sameContent(a, b) {
+  const realA = fs.realpathSync(a)
+  const realB = fs.realpathSync(b)
+  if (realA === realB) return true
+  const dirA = fs.statSync(realA).isDirectory()
+  if (dirA !== fs.statSync(realB).isDirectory()) return false
+  return dirA ? treeDigest(realA) === treeDigest(realB) : fs.readFileSync(realA).equals(fs.readFileSync(realB))
+}
+
+/**
+ * Fast-forward this package's own git checkout to its upstream, so `--update`
+ * installs the newest runner, bridge, and plugin.
+ * @returns true when the checkout moved and the installer must re-run from the new code.
+ */
+function updatePackage() {
+  const git = (...gitArgs) => spawnSync('git', ['-C', PACKAGE_ROOT, ...gitArgs], { encoding: 'utf8' })
+  const text = (out) => (out.status === 0 ? out.stdout.trim() : '')
+  if (text(git('rev-parse', '--is-inside-work-tree')) !== 'true') {
+    log('note       the package is not a git checkout; nothing to fetch')
+    return false
+  }
+  if (text(git('status', '--porcelain')) !== '') {
+    fail(`the package checkout ${PACKAGE_ROOT} has local changes; commit or stash them, or pass --no-fetch`)
+  }
+  const fetched = git('fetch', '--quiet', 'origin')
+  if (fetched.status !== 0) fail(`git fetch in ${PACKAGE_ROOT} failed: ${fetched.stderr.trim()}`)
+  const branch = text(git('symbolic-ref', '--quiet', '--short', 'HEAD'))
+  const candidates = [
+    branch === '' ? '' : text(git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')),
+    text(git('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')),
+    'origin/main',
+    'origin/master',
+  ]
+  const upstream = candidates.find((ref) => ref !== '' && git('rev-parse', '--verify', '--quiet', ref).status === 0)
+  if (upstream === undefined) fail(`no upstream branch found for ${PACKAGE_ROOT}`)
+  const before = text(git('rev-parse', 'HEAD'))
+  const after = text(git('rev-parse', upstream))
+  if (before === after) {
+    log(`unchanged  package is current with ${upstream} (${before.slice(0, 7)})`)
+    return false
+  }
+  if (git('merge-base', '--is-ancestor', 'HEAD', upstream).status !== 0) {
+    fail(`the package checkout has commits ${upstream} lacks; update it by hand`)
+  }
+  if (args['dry-run']) {
+    log(`would fast-forward the package ${before.slice(0, 7)} -> ${after.slice(0, 7)} (${upstream})`)
+    return false
+  }
+  const moved = branch === ''
+    ? git('checkout', '--quiet', '--detach', upstream)
+    : git('merge', '--quiet', '--ff-only', upstream)
+  if (moved.status !== 0) fail(`could not fast-forward ${PACKAGE_ROOT}: ${moved.stderr.trim()}`)
+  log(`updated    package ${before.slice(0, 7)} -> ${after.slice(0, 7)} (${upstream})`)
+  log('note       a submodule checkout now differs from the project\'s recorded pointer; commit it in the project')
+  return true
 }
 
 /**
@@ -336,6 +433,7 @@ function summarise(project, ruleResults = []) {
   log(`  2. follow it:    node ${tailShown} <jobId> --watch`)
   log('                   (the GUI files the job under the project folder, but cannot show it live)')
   log('  3. if the GUI was already running, reload the page so the new profile row activates')
+  log('  4. restart any agent that already runs the deepseek MCP server; it keeps the old bridge until then')
 }
 
 /** Parse `--flag value`, `--flag=value`, and bare `--flag` arguments. */

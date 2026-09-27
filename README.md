@@ -50,7 +50,7 @@ You do not need to read every piece; this table maps each path to the role it pl
 | [`.agents/mcp-deepseek/`](.agents/mcp-deepseek/README.md) | The MCP bridge: a zero-dependency stdio server (`server.cjs`) that speaks MCP to the calling client and ACP to a spawned `dsh --profile acp`. Can forward the caller's own MCP servers into the child session. Its git write guard (`git-guard.cjs`) refuses the job's commits and pushes. |
 | [`.agents/skills/deepseek-offload/`](.agents/skills/deepseek-offload/SKILL.md) | The skill doc for the calling agent: when to offload, the blocking MCP path vs. fire-and-forget background jobs, prompt contracts, safety rules, troubleshooting. |
 | [`.agents/dsh-workspace-attach/`](.agents/dsh-workspace-attach/README.md) | DSH web-profile plugin that files delegated sessions under the project folder they ran in. |
-| [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, optional vision subagent, then `doctor`. `--dry-run`, `--uninstall`, `--json`. |
+| [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, optional vision subagent, then `doctor`. `--update` fast-forwards the package and replaces stale project entries ([Updating an existing project](INSTALL.md#updating-an-existing-project)). `--dry-run`, `--uninstall`, `--json`. |
 | [`INSTALL.md`](INSTALL.md) | The install procedure written for an AI agent to execute for a human: recon, install, verify, smoke test, failure playbook, report template. |
 | [`harness/`](harness/README.md) | The Harness-side changes that make all of this work, as reviewable files and a patch. |
 
@@ -132,7 +132,8 @@ the project's `CLAUDE.md`/`AGENTS.md`, so the rule lives in the project's own in
 ## Background jobs
 
 ```sh
-node "$R" doctor                        health check, including workspace grouping
+node "$R" doctor                        health check, including workspace grouping, resume
+                                        support, and stale project entries
 node "$R" start "<prompt>" [--prompt-file FILE] [--cwd DIR] [--label NAME]
                            [--mcp-config FILE] [--permission allow|reject]
                            [--timeout-ms N] [--defer-to-off-peak] [--detach]
@@ -140,6 +141,8 @@ node "$R" start "<prompt>" [--prompt-file FILE] [--cwd DIR] [--label NAME]
 node "$R" wait   <jobId>                print the header, then block until the job settles
 node "$R" update <jobId> "<new info>"   steer a running job
 node "$R" cancel <jobId>                stop it outright
+node "$R" resume <jobId> ["<extra>"]    continue an interrupted job's session in a new job
+                                        (--session ID --cwd DIR for a session with no job)
 node "$R" list   [--all]                recent jobs
 node "$R" sessions [--cwd DIR]          sessions in the shared DSH store
 node "$R" sync-workspace [--all]        file old sessions under their project folder

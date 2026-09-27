@@ -7,7 +7,7 @@ description: >-
   Covers the MCP bridge at .agents/mcp-deepseek/server.cjs
   (deepseek_agent / deepseek_list_sessions / deepseek_update_session), the
   background job runner in .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (including `update` to steer,
-  `cancel` to stop a still-running job, `window` to check DeepSeek's peak/off-peak
+  `cancel` to stop a still-running job, `resume` to continue an interrupted job's session, `window` to check DeepSeek's peak/off-peak
   pricing, and `start --defer-to-off-peak` to schedule batch work for half price),
   how to follow a running job (the web GUI lists its session but cannot show it
   live), prompt contracts for self-contained jobs, the git write guard that refuses
@@ -175,7 +175,7 @@ Three tools, exposed by `.agents/mcp-deepseek/server.cjs`:
 
 | Tool | Arguments | Returns |
 | :--- | :--- | :--- |
-| `deepseek_agent` | `prompt` (required, self-contained), `cwd` (optional absolute), `mcpConfig` (optional path) | The child's final text, prefixed with `stopReason`, elapsed ms, `session=<id>`, and the MCP servers attached. |
+| `deepseek_agent` | `prompt` (required, self-contained), `cwd` (optional absolute), `mcpConfig` (optional path), `resumeSessionId` (optional; continue that persisted session through ACP `session/resume` instead of starting a fresh one — it must not be running elsewhere and `cwd` must be its original directory) | The child's final text, prefixed with `stopReason`, elapsed ms, `session=<id>`, and the MCP servers attached. |
 | `deepseek_list_sessions` | `cwd` (optional absolute) | `- <sessionId>  cwd=…` lines for the shared store. |
 | `deepseek_mcp_servers` | `mcpConfig` (optional path) | Which MCP servers a delegation would receive, how each translates, and what was skipped. |
 | `deepseek_update_session` | `sessionId` (required, from `deepseek_agent`'s result), `message` (optional) | Steers, or stops, a session that is **still running** in this same bridge process — see "Steering or cancelling a running session" below. Errors if the session already finished. |
@@ -240,6 +240,7 @@ node "$OFF" result  <jobId>
 node "$OFF" guard   <jobId>               # did the job try to commit or push, and where did it land?
 node "$OFF" update  <jobId> "<new information / corrected direction>"
 node "$OFF" cancel  <jobId>               # stop outright, no redirect
+node "$OFF" resume  <jobId> ["<extra>"]    # continue an interrupted job's session in a new job
 node "$OFF" wait    <jobId> --timeout-ms 900000
 node "$OFF" list    --all
 node "$OFF" sessions --cwd "$PWD"        # sessions in the shared store the GUI lists
@@ -265,7 +266,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 
 | Command | Behaviour | Exit code |
 | :--- | :--- | :--- |
-| `doctor` | Checks node, bridge, `DSH_HOME`, model patch, MCP config, job-store writability. | `0` ok, `1` fail |
+| `doctor` | Checks node, bridge, `DSH_HOME`, model patch, MCP config, job-store writability, workspace grouping, `resume` support (the bridge's `--probe` reports `resumeSessionId` and the Harness ACP agent advertises `session/resume`), and whether every project entry still matches the package. | `0` ok, `1` fail |
 | `window` | Reports whether DeepSeek pricing is peak or off-peak right now, and when it next flips — see "Off-peak planning" below. | `0` |
 | `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. The prompt comes from the positional argument, from `--prompt-file FILE` / `-f FILE`, or from stdin (`-`, or no prompt argument on a non-interactive stdin); use the file/stdin forms for anything multi-line. `--detach` returns instantly. `--read-only` pins the job to the Harness's read-only file policy, so it cannot modify a file; `--allow-git-write` lifts the git write guard instead, and the two are mutually exclusive. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
 | `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
@@ -273,6 +274,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `guard` | The job's git write guard state, plus any refs a guarded push landed in the sandbox instead of the real remote. | `0` |
 | `update` | Relays new information to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
+| `resume` | Continues a finished, failed, or interrupted job's DeepSeek session in a **new** job through ACP `session/resume`: same session id, conversation history, `cwd`, git write guard, and file policy. The first turn tells the agent its run was interrupted, to re-check the workspace for partial edits, and to finish the original task; trailing text is appended as extra instructions. Refuses a job that is still active (worker alive) or never recorded a session id; `--session ID --cwd DIR` resumes a session found with `sessions` that has no job record. The new job records `resumeOf`, the original `resumedBy`. | `0` launched, `1` refused |
 | `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
 | `list` | Recent jobs, newest first; `--all` for every job. | `0` |
 | `sessions` | Raw session list for the shared store. | `0` |
@@ -427,6 +429,7 @@ original session in the GUI.
 
 | Symptom | Cause and fix |
 | :--- | :--- |
+| `doctor` FAIL: `bridge supports resume` or `project entries current` | The project runs an older package: `.agents/deepseek-offload/install.sh --update` (see INSTALL.md "Updating an existing project"), then restart the agent so its MCP bridge reloads. |
 | `doctor` FAIL: bridge not found | Wrong layout — the runner expects `.agents/mcp-deepseek/server.cjs` beside it, i.e. the submodule checked out whole. |
 | Session never appears in the GUI at all | `DSH_HOME` mismatch — GUI and bridge must share `~/.dsh`. |
 | Job row is in the GUI but idle, and its transcript never updates | Expected, not a fault: the GUI cannot host or stream a session another process runs. Follow it with `scripts/session-tail.mjs <jobId> --watch`. |

@@ -333,3 +333,46 @@ test('a project with an existing GEMINI.md gains the orchestrator rule', () => {
   assert.ok(text.includes(RULE_BEGIN))
 })
 
+/**
+ * A project whose runner entry links into another, older checkout of this
+ * package: the state a project is in after its own submodule copy fell behind.
+ */
+function staleRunnerProject(prefix) {
+  const project = scratch(prefix)
+  const { link, target } = projectLinks(project).find(({ link }) => link.endsWith('dsh-offload.mjs'))
+  const older = join(scratch(`${prefix}-older`), 'deepseek-offload', relative(join(target, '..', '..', '..', '..', '..'), target))
+  seed(older, '// an older runner\n')
+  mkdirSync(dirname(link), { recursive: true })
+  symlinkSync(older, link)
+  return { project, link, target, older }
+}
+
+test('a link into an older checkout is reported stale and kept without --update', () => {
+  const { project, link, target, older } = staleRunnerProject('stale-kept')
+  linkEntry(project, link, target, { update: false })
+  assert.equal(realpathSync(link), realpathSync(older))
+})
+
+test('--update replaces a link into an older checkout with this package', () => {
+  const { project, link, target } = staleRunnerProject('stale-replaced')
+  linkEntry(project, link, target, { update: true })
+  assert.equal(realpathSync(link), realpathSync(target))
+})
+
+test('--update moves a copied script aside and links the package', () => {
+  const project = scratch('stale-copy')
+  const { link, target } = projectLinks(project).find(({ link }) => link.endsWith('server.cjs'))
+  seed(link, '// an old copied bridge\n')
+  linkEntry(project, link, target, { update: true })
+  assert.equal(realpathSync(link), realpathSync(target))
+  assert.equal(readFileSync(`${link}.pre-update`, 'utf8'), '// an old copied bridge\n')
+})
+
+test('--update keeps a project-owned SKILL.md', () => {
+  const project = scratch('own-skill')
+  const { link, target } = projectLinks(project).find(({ link }) => link.endsWith('SKILL.md'))
+  seed(link, '# our own skill\n')
+  linkEntry(project, link, target, { update: true })
+  assert.equal(lstatSync(link).isSymbolicLink(), false)
+  assert.equal(readFileSync(link, 'utf8'), '# our own skill\n')
+})

@@ -47,6 +47,10 @@ deepseek-offload install.sh
                            deepseek-flash)
   --with-vision-subagent   also add the read_image_vision subagent to the
                            Harness `standard` preset
+  --update                 fast-forward this package's git checkout to its
+                           upstream, re-run the new installer, and replace stale
+                           project entries (links into another checkout of this
+                           package, copied scripts); --no-fetch skips the git step
   --dry-run                print the plan without writing anything
   --uninstall              remove the managed rows, link, and MCP entries
   --json                   machine-readable result
@@ -54,6 +58,7 @@ deepseek-offload install.sh
 Examples
   .agents/deepseek-offload/install.sh --with-mcp-config
   .agents/deepseek-offload/install.sh --dry-run
+  .agents/deepseek-offload/install.sh --update --with-mcp-config
   .agents/deepseek-offload/install.sh --uninstall
 USAGE
   exit 0
