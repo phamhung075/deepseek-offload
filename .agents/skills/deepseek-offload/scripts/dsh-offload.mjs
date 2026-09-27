@@ -2280,6 +2280,13 @@ function usage() {
                                P(none) what-if at 0.4/0.5/0.6
   jev triage <jobId> [--json]  failure triage (code rules first, then one
                                UNVALIDATED Jev failure_kind); never auto-resumes
+  # -- Jev planning aids (own block; each command only SUGGESTS) --
+  jev route --prompt-file F [--roles-file R] [--json]
+                               rank roles the work order fits (measured 2026-09-27:
+                               40.9% top-1 / 54.5% top-2), advise background vs
+                               blocking and --defer-to-off-peak. Roles default to
+                               <projectRoot>/.agents/jev-roles.json
+                               (DSH_OFFLOAD_JEV_ROLES overrides).
                                Jev is optional and a pre-screen only — the
                                orchestrator still reviews every diff.
 

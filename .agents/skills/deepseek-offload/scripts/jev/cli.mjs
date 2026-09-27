@@ -11,6 +11,7 @@ import { runWatch } from './watch.mjs'
 import { commandClaims } from './claims.mjs'
 import { commandDecide, commandLog } from './decide.mjs'
 import { commandTriage } from './triage.mjs'
+import { runRoute } from './route.mjs'
 
 /** Shown by `dsh-offload jev help` and appended to the runner's usage. */
 export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV] [--json]
@@ -39,6 +40,12 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
   jev triage <jobId> [--json]  failure triage: code rules first, then one
                                UNVALIDATED Jev failure_kind when no rule
                                matches. Never auto-resumes.
+  jev route --prompt-file F [--roles-file R] [--json]
+                               rank the roles a work order fits (measured
+                               2026-09-27: 40.9% top-1 / 54.5% top-2) and advise
+                               background vs blocking and off-peak. Suggests
+                               only. Roles default to <projectRoot>/.agents/
+                               jev-roles.json (DSH_OFFLOAD_JEV_ROLES overrides).
                              Auto-review is configured on start/resume with
                              --review-repo DIR (or DSH_OFFLOAD_REVIEW_REPO); the
                              worker runs it when the job settles and result/wait
@@ -77,6 +84,8 @@ export async function runJevCli(positional, flags, ctx) {
       return commandLog(rest, flags, ctx)
     case 'triage':
       return commandTriage(rest, flags, ctx)
+    case 'route':
+      return runRoute(rest, flags, ctx)
     case undefined:
     case 'help':
     case '--help':

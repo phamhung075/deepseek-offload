@@ -628,6 +628,36 @@ triage every interval while it waits. On a confident (`WATCH_MIN_CONFIDENCE`, 0.
 lines and the steering commands (`dsh-offload update <jobId> "..."` / `dsh-offload cancel <jobId>`),
 and exits `4`; the job keeps running. Without a key it prints the disabled line and waits normally.
 
+### Jev planning aids and worker self-check
+
+These commands SUGGEST; none of them dispatches, approves, or changes a job. Every one stays
+disabled without a key, printing the same one `jev: disabled — set TYPESAFE_API_KEY` line.
+
+**`jev route` — role suggestion (measured, suggestion only).** Reads a roles file
+(`[{"name": "...", "mission": "..."}]`), sends one Jev request with one `fits_role_v2` noul per role
+(ids `role_<index>`) plus two **UNVALIDATED** nouls, `can_defer` and `needs_background`, and prints
+the roles ranked by probability. The suggested set is every role at or above `0.5`, or the single top
+role when none is; the measured caveat prints every time. The two extras drive the advice line:
+`needs_background` chooses a background job (`dsh-offload start`) over a blocking `deepseek_agent`
+call, and `can_defer` suggests adding `--defer-to-off-peak`. The roles file defaults to
+`<projectRoot>/.agents/jev-roles.json`; `--roles-file R` or `DSH_OFFLOAD_JEV_ROLES` overrides it, and
+without one the command prints how to create it and exits `0`.
+
+```sh
+cat > .agents/jev-roles.json <<'JSON'
+[
+  { "name": "DevOps-SRE",        "mission": "Gateway, worker, deploys, and the internal key channel" },
+  { "name": "Pipeline-Engineer", "mission": "Native Rust core, the CGO ABI, and vision rescue" }
+]
+JSON
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs jev route --prompt-file task.md
+```
+
+Measured on a known-answer evaluation, 2026-09-27: `fits_role_v2` scored **40.9% top-1 / 54.5%
+top-2** on 22 real work orders (only 3 of the 5 roster roles appeared as primary labels). That is why
+every run prints `routing measured 40.9% top-1 / 54.5% top-2 on 22 work orders — a suggestion for the
+orchestrator, not a dispatch`.
+
 ---
 
 ## 9. Troubleshooting

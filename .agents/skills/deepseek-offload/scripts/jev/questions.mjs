@@ -151,6 +151,37 @@ export function failureKindQuestion() {
   }
 }
 
+/**
+ * `fits_role_v2`, the best role-routing wording from the known-answer
+ * evaluation, 2026-09-27 (top-1 40.9%, label-in-top-2 54.5% on 22 real work
+ * orders; only 3 of the 5 roster roles appear as primary labels there).
+ *
+ * `jev route` sends one question per role in a single request, so the role
+ * record travels in the question's structured `instructions` (`role` beside
+ * `question`) rather than in the shared state — the wording below stays
+ * verbatim.
+ */
+export const FITS_ROLE_V2 = {
+  type: 'noul',
+  instructions: 'Is the work in `request` part of the work `role.mission` describes?',
+  criteria: {
+    true: 'The request asks for work the mission describes.',
+    false: 'The request asks for work outside the mission.',
+  },
+}
+
+/** UNVALIDATED route follow-up: can the work wait for off-peak pricing? */
+export const CAN_DEFER = {
+  type: 'noul',
+  instructions: 'Can the work in `request` wait several hours without harm?',
+}
+
+/** UNVALIDATED route follow-up: does the work need a background job? */
+export const NEEDS_BACKGROUND = {
+  type: 'noul',
+  instructions: 'Does `request` involve several steps, several files, or long-running builds or tests?',
+}
+
 /** Choice id for the watch progress triage. */
 export const PROGRESS_ID = 'progress'
 
