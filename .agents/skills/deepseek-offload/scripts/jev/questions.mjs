@@ -182,6 +182,18 @@ export const NEEDS_BACKGROUND = {
   instructions: 'Does `request` involve several steps, several files, or long-running builds or tests?',
 }
 
+/**
+ * The two `jev skills` choice questions. Both are UNVALIDATED: no labelled set
+ * measured them. The first ranks every skill by its frontmatter description; the
+ * second re-reads the top three with the opening of each `SKILL.md` in state.
+ * The two-request shape follows the TypeSafe skill-suggestion cookbook.
+ */
+export const SKILL_NONE = 'none'
+export const SKILL_WIDE_INSTRUCTIONS =
+  'Which of these skills, if any, is the right one to load to help with `request`? Choose `none` if no listed skill fits.'
+export const SKILL_SHORTLIST_INSTRUCTIONS =
+  'Exactly one of these skills is the right one to load for `request`; read what each actually does, not just its name. Choose `none` if none of them fits.'
+
 /** Choice id for the watch progress triage. */
 export const PROGRESS_ID = 'progress'
 

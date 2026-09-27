@@ -12,6 +12,7 @@ import { commandClaims } from './claims.mjs'
 import { commandDecide, commandLog } from './decide.mjs'
 import { commandTriage } from './triage.mjs'
 import { runRoute } from './route.mjs'
+import { runSkills } from './skills.mjs'
 
 /** Shown by `dsh-offload jev help` and appended to the runner's usage. */
 export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV] [--json]
@@ -46,6 +47,11 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
                                background vs blocking and off-peak. Suggests
                                only. Roles default to <projectRoot>/.agents/
                                jev-roles.json (DSH_OFFLOAD_JEV_ROLES overrides).
+  jev skills --prompt-file F [--skills-dir D] [--json]
+                               UNVALIDATED suggestion of which project skill to
+                               attach, in two requests (rank all names, then
+                               re-read the top 3 with their SKILL.md openings).
+                               Skills default to <projectRoot>/.agents/skills.
                              Auto-review is configured on start/resume with
                              --review-repo DIR (or DSH_OFFLOAD_REVIEW_REPO); the
                              worker runs it when the job settles and result/wait
@@ -86,6 +92,8 @@ export async function runJevCli(positional, flags, ctx) {
       return commandTriage(rest, flags, ctx)
     case 'route':
       return runRoute(rest, flags, ctx)
+    case 'skills':
+      return runSkills(rest, flags, ctx)
     case undefined:
     case 'help':
     case '--help':

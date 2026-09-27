@@ -658,6 +658,15 @@ top-2** on 22 real work orders (only 3 of the 5 roster roles appeared as primary
 every run prints `routing measured 40.9% top-1 / 54.5% top-2 on 22 work orders — a suggestion for the
 orchestrator, not a dispatch`.
 
+**`jev skills` — skill suggestion (UNVALIDATED).** Reads `<skills-dir>/*/SKILL.md` frontmatter
+(`name` and `description`, with folded `>-` and literal `|` blocks tolerated), then uses the
+cookbook's two-request shape: request 1 is a `choice` over every skill name plus `none`, with the
+descriptions as criteria; its top three by probability go into request 2, a `choice` over just those
+three plus `none` with each `SKILL.md`'s first 60 lines in state. The output names the pick and says
+`attach .agents/skills/<name>/SKILL.md to the work order`. Skills default to
+`<projectRoot>/.agents/skills` (`--skills-dir D` overrides); with fewer than two skills the command is
+skipped with one line. **The questions and thresholds were never measured — treat this as a hint.**
+
 ---
 
 ## 9. Troubleshooting

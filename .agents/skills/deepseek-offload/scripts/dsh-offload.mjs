@@ -2287,6 +2287,11 @@ function usage() {
                                blocking and --defer-to-off-peak. Roles default to
                                <projectRoot>/.agents/jev-roles.json
                                (DSH_OFFLOAD_JEV_ROLES overrides).
+  jev skills --prompt-file F [--skills-dir D] [--json]
+                               UNVALIDATED suggestion of which project skill to
+                               attach; two requests (rank every name, then
+                               re-read the top 3 with their SKILL.md openings).
+                               Skills default to <projectRoot>/.agents/skills.
                                Jev is optional and a pre-screen only — the
                                orchestrator still reviews every diff.
 

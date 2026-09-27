@@ -241,3 +241,89 @@ test('route uses the default <projectRoot>/.agents/jev-roles.json', async (t) =>
   assert.equal(stub.requests.length, 1)
   assert.match(out.stdout, /suggested: QA-Auditor/)
 })
+
+// ---------------------------------------------------------------------------
+// Feature 3: `jev skills`
+// ---------------------------------------------------------------------------
+const { parseFrontmatter } = await import('../.agents/skills/deepseek-offload/scripts/jev/skills.mjs')
+
+/** Write one skill directory with frontmatter and a body. */
+function writeSkill(skillsDir, name, description, body = `# ${name}\nBody line.\n`) {
+  const dir = path.join(skillsDir, name)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n${body}`)
+}
+
+test('the frontmatter parser tolerates a folded description', () => {
+  const text = '---\nname: alpha\ndescription: >-\n  Creates alpha\n  artifacts for the team.\n---\n# Alpha\n'
+  const frontmatter = parseFrontmatter(text)
+  assert.equal(frontmatter.name, 'alpha')
+  assert.equal(frontmatter.description, 'Creates alpha artifacts for the team.')
+  const literal = parseFrontmatter('---\nname: b\ndescription: |\n  line one\n  line two\n---\n')
+  assert.equal(literal.description, 'line one\nline two')
+})
+
+test('skills runs two requests and carries the top three into the second', async (t) => {
+  const root = scratch('skills')
+  const skillsDir = path.join(root, 'skills')
+  writeSkill(skillsDir, 'alpha', 'Does alpha things.')
+  writeSkill(skillsDir, 'beta', 'Does beta things.', '# Beta\nfirst beta line\n')
+  writeSkill(skillsDir, 'gamma', 'Does gamma things.', '# Gamma\n')
+  writeSkill(skillsDir, 'delta', 'Does delta things.', '# Delta\n')
+
+  const stub = await startStub((parsed) => {
+    const question = parsed?.questions?.which
+    if (!question) return null
+    const probabilities = {}
+    for (const name of Object.keys(question.criteria)) probabilities[name] = 0.02
+    probabilities.none = 0.01
+    if (parsed.state?.skills === undefined) {
+      probabilities.beta = 0.8
+      probabilities.gamma = 0.6
+      probabilities.delta = 0.4
+      probabilities.alpha = 0.05
+      return { payload: { model: 'jev-test', answers: { which: { choice: 'beta', probabilities, confidence: 0.8 } }, usage: {} } }
+    }
+    probabilities.beta = 0.9
+    return { payload: { model: 'jev-test', answers: { which: { choice: 'beta', probabilities, confidence: 0.9 } }, usage: {} } }
+  })
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+  const promptFile = path.join(root, 'prompt.md')
+  fs.writeFileSync(promptFile, 'Add alpha coverage to the parser.\n')
+
+  const out = await run(['jev', 'skills', '--prompt-file', promptFile, '--skills-dir', skillsDir], env)
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(stub.requests.length, 2, 'one wide request then one shortlist request')
+
+  const wide = stub.requests[0]
+  assert.equal(wide.state.request, 'Add alpha coverage to the parser.')
+  assert.equal(wide.state.skills, undefined)
+  assert.equal(wide.questions.which.criteria.alpha, 'Does alpha things.')
+
+  const narrow = stub.requests[1]
+  assert.deepEqual(Object.keys(narrow.state.skills), ['beta', 'gamma', 'delta'])
+  assert.ok(narrow.state.skills.beta.includes('# Beta'), 'the shortlist carries SKILL.md text')
+  assert.ok(narrow.state.skills.beta.includes('first beta line'))
+  assert.equal(narrow.state.skills.alpha, undefined)
+
+  assert.match(out.stdout, /attach \.agents\/skills\/beta\/SKILL\.md to the work order/)
+  assert.match(out.stdout, /UNVALIDATED/)
+})
+
+test('skills skips when fewer than two skills exist', async (t) => {
+  const root = scratch('skills-one')
+  const skillsDir = path.join(root, 'skills')
+  writeSkill(skillsDir, 'only', 'The only one.')
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+  const promptFile = path.join(root, 'prompt.md')
+  fs.writeFileSync(promptFile, 'Do something.\n')
+
+  const out = await run(['jev', 'skills', '--prompt-file', promptFile, '--skills-dir', skillsDir], env)
+  assert.equal(out.status, 0, out.stderr)
+  assert.match(out.stdout, /need at least 2/)
+  assert.equal(stub.requests.length, 0)
+})
+
