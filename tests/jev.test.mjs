@@ -108,7 +108,10 @@ function run(args, env) {
   })
 }
 
-const gitIn = (repo, ...args) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' })
+// Fixture repositories must not inherit a delegated-job guard from an ambient
+// GIT_CONFIG_GLOBAL.
+const FIXTURE_GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
+const gitIn = (repo, ...args) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: FIXTURE_GIT_ENV })
 
 /** A repo with a base commit, one commit touching three files, and untracked files. */
 function makeRepo(root) {

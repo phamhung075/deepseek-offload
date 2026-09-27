@@ -16,7 +16,13 @@ function scratch(name) {
 
 /** Run git, returning the raw result so a test can assert on the failure too. */
 function git(cwd, args, env = {}) {
-  return spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...env } })
+  // Fixtures build repositories before installing their own guard; never inherit
+  // a delegated-job guard from an ambient GIT_CONFIG_GLOBAL.
+  return spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, ...env, GIT_CONFIG_GLOBAL: env.GIT_CONFIG_GLOBAL ?? '/dev/null' },
+  })
 }
 
 /** Run git and require success. */

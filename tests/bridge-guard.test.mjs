@@ -15,7 +15,13 @@ function scratch(name) {
 
 /** Run git, returning the raw result. */
 function git(cwd, args, env = {}) {
-  return spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...env } })
+  // Fixtures build their own repositories; never inherit a delegated-job guard
+  // from an ambient GIT_CONFIG_GLOBAL.
+  return spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, ...env, GIT_CONFIG_GLOBAL: env.GIT_CONFIG_GLOBAL ?? '/dev/null' },
+  })
 }
 
 /** Run git and require success. */
@@ -117,10 +123,12 @@ process.stdin.on('data', (chunk) => {
  */
 function callAgent(fixture, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    // Do not inherit a caller-level git-write opt-out: only the explicit
-    // `extraEnv` may lift the guard, so the guarded cases stay guarded.
+    // Do not inherit a caller-level git-write opt-out or a delegated-job guard
+    // config: only the explicit `extraEnv` may lift the guard, and the bridge
+    // sets GIT_CONFIG_GLOBAL itself when it installs one.
     const env = { ...process.env }
     delete env.DEEPSEEK_MCP_ALLOW_GIT_WRITE
+    delete env.GIT_CONFIG_GLOBAL
     const bridge = spawn(process.execPath, [BRIDGE], {
       env: {
         ...env,
