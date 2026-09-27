@@ -117,9 +117,13 @@ process.stdin.on('data', (chunk) => {
  */
 function callAgent(fixture, extraEnv = {}) {
   return new Promise((resolve, reject) => {
+    // Do not inherit a caller-level git-write opt-out: only the explicit
+    // `extraEnv` may lift the guard, so the guarded cases stay guarded.
+    const env = { ...process.env }
+    delete env.DEEPSEEK_MCP_ALLOW_GIT_WRITE
     const bridge = spawn(process.execPath, [BRIDGE], {
       env: {
-        ...process.env,
+        ...env,
         ...extraEnv,
         HOME: fixture.home,
         GIT_CONFIG_NOSYSTEM: '1',
