@@ -11,10 +11,10 @@
  * It SUGGESTS where to look; the orchestrator decides which findings are real.
  * The evaluation was SYNTHETIC, so that caveat prints every time.
  */
-import fs from 'node:fs'
-import path from 'node:path'
 import { callJev, isEnabled, DISABLED_LINE, pool, CONCURRENCY, probability } from './client.mjs'
 import { CONTRADICTS_ID, CONTRADICTS_QUESTION } from './questions.mjs'
+import { pathRegex } from './paths.mjs'
+import { readResultText } from './job-result.mjs'
 
 /** At most this many pairs are ever sent, so one huge job pair cannot blow up state. */
 export const PAIRS_MAX = 60
@@ -31,18 +31,10 @@ export const CONTRADICTS_THRESHOLD = 0.5
 /** The always-printed caveat. */
 export const CONFLICTS_CAVEAT = 'measured on synthetic contradictions only (AUC 0.997)'
 
-/**
- * Paths that look like repository files (with a known extension), optionally
- * carrying a `:line` / `:~line` citation. Line numbers are stripped, because the
- * prefilter compares files.
- */
-export const PATH_RE =
-  /(?:[A-Za-z0-9_@][A-Za-z0-9_@./-]*\.(?:go|rs|ts|tsx|js|jsx|mjs|cjs|py|sh|bash|yml|yaml|toml|json|sql|proto|md|mod|conf|cfg|ini|css|html|xml|txt))(?::~?\d+)?/g
-
-/** The unique file paths a text cites. */
+/** The unique file paths a text cites; line numbers are stripped. */
 export function extractPaths(text) {
   const paths = []
-  for (const match of String(text).matchAll(PATH_RE)) {
+  for (const match of String(text).matchAll(pathRegex())) {
     const value = match[0].replace(/:~?\d+$/, '')
     if (!paths.includes(value)) paths.push(value)
   }
@@ -108,23 +100,6 @@ export function planPairs(jobFindings) {
 
 const trim = (text, chars) => (text.length > chars ? `${text.slice(0, chars)}…` : text)
 
-/** Read one job's result text, preferring the stored result file. */
-function resultTextFor(jobId, job, ctx) {
-  const candidates = []
-  if (typeof job.resultFile === 'string' && job.resultFile !== '' && typeof ctx.projectRoot === 'string') {
-    candidates.push(path.resolve(ctx.projectRoot, job.resultFile))
-  }
-  candidates.push(path.join(ctx.jobsDir, `${jobId}.result.md`))
-  for (const file of candidates) {
-    try {
-      if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8')
-    } catch {
-      /* keep trying */
-    }
-  }
-  return ''
-}
-
 function renderHuman(report, ctx) {
   const lines = []
   lines.push(`jev conflicts — pre-screen for the orchestrator's review; Jev does not decide (${CONFLICTS_CAVEAT})`)
@@ -162,7 +137,7 @@ export async function runConflicts(positional, flags, ctx) {
   try {
     for (const jobId of jobIds) {
       const job = ctx.readJob(jobId)
-      jobFindings.push({ jobId, findings: extractFindings(resultTextFor(jobId, job, ctx)) })
+      jobFindings.push({ jobId, findings: extractFindings(readResultText(jobId, job, ctx)) })
     }
   } catch (error) {
     ctx.stderr.write(`dsh-offload: ${error.message}\n`)

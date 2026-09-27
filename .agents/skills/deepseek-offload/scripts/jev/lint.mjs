@@ -13,9 +13,9 @@
  * The same findings power `start --jev-lint` (or `DSH_OFFLOAD_JEV_LINT=1`),
  * which prints them before dispatch and never prevents a start.
  */
-import fs from 'node:fs'
 import { callJev, isEnabled, DISABLED_LINE } from './client.mjs'
 import { LINT_QUESTIONS } from './questions.mjs'
+import { resolvePromptFile, readPromptFile } from './prompt-file.mjs'
 
 /** Word-budget bounds for a self-contained work order. */
 export const MIN_WORDS = 20
@@ -132,20 +132,13 @@ export async function runLint(positional, flags, ctx) {
     ctx.stdout.write(`${DISABLED_LINE}\n`)
     return 0
   }
-  const promptFile = typeof flags['prompt-file'] === 'string'
-    ? flags['prompt-file']
-    : typeof flags.f === 'string' ? flags.f : positional[0] ?? null
+  const promptFile = resolvePromptFile(flags, positional)
   if (promptFile === null) {
     ctx.stderr.write('dsh-offload: jev lint requires --prompt-file FILE\n')
     return 1
   }
-  let prompt
-  try {
-    prompt = fs.readFileSync(promptFile, 'utf8').trim()
-  } catch (error) {
-    ctx.stderr.write(`dsh-offload: cannot read --prompt-file: ${error.message}\n`)
-    return 1
-  }
+  const prompt = readPromptFile(promptFile, ctx)
+  if (prompt === null) return 1
   const readOnly = flags['read-only'] === true
   const codeWarnings = runCodeChecks(prompt)
   let answers

@@ -19,6 +19,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { callJev, isEnabled, DISABLED_LINE, pool, CONCURRENCY, probability } from './client.mjs'
 import { buildGroups, chunkHunks } from './diff.mjs'
+import { resolvePromptFile, readPromptFile } from './prompt-file.mjs'
 import { HUNK_QUESTIONS, NONE_CHOICE, oddHunkRequest, ODD_HUNK_ID } from './questions.mjs'
 import {
   loadRulesConfig,
@@ -178,9 +179,7 @@ function renderHuman(report, ctx) {
 export async function runReview(positional, flags, ctx) {
   const env = ctx.env
   const jobId = positional[0] ?? null
-  const promptFile = typeof flags['prompt-file'] === 'string'
-    ? flags['prompt-file']
-    : typeof flags.f === 'string' ? flags.f : null
+  const promptFile = resolvePromptFile(flags)
   const repo = typeof flags.repo === 'string' ? flags.repo : null
   const base = typeof flags.base === 'string' ? flags.base : null
   const head = typeof flags.head === 'string' ? flags.head : 'HEAD'
@@ -200,12 +199,8 @@ export async function runReview(positional, flags, ctx) {
   let workOrder
   let source
   if (promptFile !== null) {
-    try {
-      workOrder = fs.readFileSync(promptFile, 'utf8').trim()
-    } catch (error) {
-      ctx.stderr.write(`dsh-offload: cannot read --prompt-file: ${error.message}\n`)
-      return EXIT_ERROR
-    }
+    workOrder = readPromptFile(promptFile, ctx)
+    if (workOrder === null) return EXIT_ERROR
     source = `prompt-file ${promptFile}`
   } else if (jobId !== null) {
     try {

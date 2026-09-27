@@ -11,6 +11,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { probability } from './client.mjs'
 
 /** The only accepted labels. */
 export const DECISIONS = ['accept', 'reject', 'partial']
@@ -116,12 +117,10 @@ export function commandDecide(positional, flags, ctx) {
   if (flags.json === true) {
     ctx.stdout.write(`${JSON.stringify(entry, null, 2)}\n`)
   } else {
-    ctx.stdout.write(`jev decision recorded: ${jobId} ${decision} (review ${entry.review.state}, P(none)min=${format(entry.review.pNoneMin)})\n`)
+    ctx.stdout.write(`jev decision recorded: ${jobId} ${decision} (review ${entry.review.state}, P(none)min=${probability(entry.review.pNoneMin)})\n`)
   }
   return EXIT_DECIDE_OK
 }
-
-const format = (value) => (typeof value === 'number' ? value.toFixed(3) : 'n/a')
 
 /** Every logged decision, oldest first; a corrupt line is skipped. */
 export function readLog(jobsDir) {

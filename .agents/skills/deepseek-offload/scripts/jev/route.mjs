@@ -16,6 +16,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { callJev, isEnabled, DISABLED_LINE, probability } from './client.mjs'
 import { FITS_ROLE_V2, CAN_DEFER, NEEDS_BACKGROUND } from './questions.mjs'
+import { resolvePromptFile, readPromptFile } from './prompt-file.mjs'
 
 /**
  * The measured caveat. Printed with every suggestion, and stored on the JSON
@@ -148,20 +149,13 @@ export async function runRoute(positional, flags, ctx) {
     ctx.stdout.write(`${DISABLED_LINE}\n`)
     return 0
   }
-  const promptFile = typeof flags['prompt-file'] === 'string'
-    ? flags['prompt-file']
-    : typeof flags.f === 'string' ? flags.f : positional[0] ?? null
+  const promptFile = resolvePromptFile(flags, positional)
   if (promptFile === null) {
     ctx.stderr.write('dsh-offload: jev route requires --prompt-file FILE\n')
     return 1
   }
-  let prompt
-  try {
-    prompt = fs.readFileSync(promptFile, 'utf8').trim()
-  } catch (error) {
-    ctx.stderr.write(`dsh-offload: cannot read --prompt-file: ${error.message}\n`)
-    return 1
-  }
+  const prompt = readPromptFile(promptFile, ctx)
+  if (prompt === null) return 1
 
   const rolesFile = resolveRolesFile(flags, env, ctx.projectRoot)
   if (!fs.existsSync(rolesFile)) {

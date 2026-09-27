@@ -16,6 +16,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { callJev, isEnabled, DISABLED_LINE, pool, CONCURRENCY } from './client.mjs'
 import { CLAIM_SUPPORTED_ID, CLAIM_SUPPORTED_QUESTION } from './questions.mjs'
+import { citeRegex } from './paths.mjs'
+import { readResultText } from './job-result.mjs'
 
 /** At most this many claims are checked per job. */
 export const CLAIMS_MAX = 40
@@ -33,14 +35,7 @@ export const SUPPORTED_THRESHOLD = 0.3
 export const EXIT_CLAIMS_OK = 0
 export const EXIT_CLAIMS_ERROR = 1
 
-/** The measured citation extension list; keeps URLs and prose out. */
-const CITE_EXTENSIONS = 'go|rs|ts|tsx|js|jsx|mjs|cjs|py|sh|bash|yml|yaml|toml|json|sql|proto|md|mod|conf|cfg|ini|css|html|xml|txt'
-const CITE_BODY = `\`?([A-Za-z0-9_@][A-Za-z0-9_@./-]*\\.(?:${CITE_EXTENSIONS}))\`?\\s*:\\s*~?(\\d+)(?:\\s*-\\s*~?(\\d+))?`
-
-function citeRegex() {
-  return new RegExp(CITE_BODY, 'g')
-}
-
+/** Truncate model input to the measured state shape, marking the cut. */
 const trim = (text, max) => (typeof text === 'string' && text.length > max ? `${text.slice(0, max)}\n...[TRUNCATED]` : text)
 
 /** Split text into sentence-ish units, keeping the newline boundaries. */
@@ -105,15 +100,6 @@ export function readEvidence(repo, rev, citedPath, line, radius = EVIDENCE_RADIU
   return { path: citedPath, line: center, lines: numbered.join('\n'), fileLines: lines.length, lo, hi }
 }
 
-/** The result text of a job, or '' when it has none. */
-export function readResultText(jobsDir, jobId) {
-  try {
-    return fs.readFileSync(path.join(jobsDir, `${jobId}.result.md`), 'utf8')
-  } catch {
-    return ''
-  }
-}
-
 /** The stored claim report for a job, or null. */
 export function readClaimsReport(jobsDir, jobId) {
   try {
@@ -127,7 +113,7 @@ export function readClaimsReport(jobsDir, jobId) {
  * Check a job's claims against the code they cite.
  * @param jobId - job whose result text carries the claims.
  * @param job - record carrying `reviewRepo` (the default repo).
- * @param ctx - `{env, jobsDir, writeJsonAtomic}`.
+ * @param ctx - `{env, jobsDir, projectRoot, writeJsonAtomic}`.
  * @param opts - `{repo, rev, text}`; `rev` defaults to the reviewed head (`HEAD`).
  * @returns the report object; `state: 'disabled'` without a key.
  */
@@ -136,7 +122,7 @@ export async function runClaims(jobId, job, ctx, opts = {}) {
   const repo = opts.repo ?? (typeof job.reviewRepo === 'string' ? job.reviewRepo : null)
   if (repo === null || repo === '') throw new Error('jev claims requires --repo DIR (or a job reviewRepo)')
   const rev = typeof opts.rev === 'string' && opts.rev !== '' ? opts.rev : 'HEAD'
-  const text = typeof opts.text === 'string' ? opts.text : readResultText(ctx.jobsDir, jobId)
+  const text = typeof opts.text === 'string' ? opts.text : readResultText(jobId, job, ctx)
 
   const found = extractClaims(text)
   const selected = found.slice(0, CLAIMS_MAX)

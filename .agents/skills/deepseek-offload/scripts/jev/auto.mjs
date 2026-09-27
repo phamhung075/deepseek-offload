@@ -19,9 +19,10 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { isEnabled } from './client.mjs'
+import { isEnabled, probability } from './client.mjs'
 import { runReview, EXIT_CLEAN, EXIT_FLAGGED } from './review.mjs'
-import { runClaims, extractClaims, readResultText, readClaimsReport } from './claims.mjs'
+import { runClaims, extractClaims, readClaimsReport } from './claims.mjs'
+import { readResultText } from './job-result.mjs'
 
 /** Bound the whole in-process review; a slow API must not hold the worker forever. */
 export const AUTO_REVIEW_TIMEOUT_MS = 180_000
@@ -207,7 +208,7 @@ export async function runAutoReview(jobId, job, ctx) {
   let claimsConsidered = 0
   let claimsUnsupported = 0
   try {
-    const text = readResultText(ctx.jobsDir, jobId)
+    const text = readResultText(jobId, job, ctx)
     if (text !== '' && extractClaims(text).length > 0) {
       const claims = await runClaims(jobId, job, ctx, { repo: job.reviewRepo })
       claimsFlagged = claims.claimsFlagged === true
@@ -269,7 +270,6 @@ export async function ensureJevReview(jobId, job, opts) {
   }
 }
 
-const probability = (value) => (typeof value === 'number' ? value.toFixed(3) : 'n/a')
 const shortSha = (sha) => (sha === 'untracked' ? 'untracked' : String(sha ?? 'unknown').slice(0, 7))
 
 /**
