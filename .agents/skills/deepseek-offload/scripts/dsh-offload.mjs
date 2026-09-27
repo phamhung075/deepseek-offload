@@ -2292,6 +2292,10 @@ function usage() {
                                attach; two requests (rank every name, then
                                re-read the top 3 with their SKILL.md openings).
                                Skills default to <projectRoot>/.agents/skills.
+  jev conflicts <jobId> <jobId> [...] [--json]
+                               pairs findings from different jobs that share a
+                               file path and asks whether they contradict each
+                               other (measured on SYNTHETIC pairs only, AUC 0.997).
                                Jev is optional and a pre-screen only — the
                                orchestrator still reviews every diff.
 

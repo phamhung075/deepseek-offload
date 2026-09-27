@@ -13,6 +13,7 @@ import { commandDecide, commandLog } from './decide.mjs'
 import { commandTriage } from './triage.mjs'
 import { runRoute } from './route.mjs'
 import { runSkills } from './skills.mjs'
+import { runConflicts } from './conflicts.mjs'
 
 /** Shown by `dsh-offload jev help` and appended to the runner's usage. */
 export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV] [--json]
@@ -52,6 +53,10 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
                                attach, in two requests (rank all names, then
                                re-read the top 3 with their SKILL.md openings).
                                Skills default to <projectRoot>/.agents/skills.
+  jev conflicts <jobId> <jobId> [...] [--json]
+                               find findings from different jobs that share a
+                               file path and contradict each other (measured on
+                               SYNTHETIC pairs only, AUC 0.997). Suggests only.
                              Auto-review is configured on start/resume with
                              --review-repo DIR (or DSH_OFFLOAD_REVIEW_REPO); the
                              worker runs it when the job settles and result/wait
@@ -94,6 +99,8 @@ export async function runJevCli(positional, flags, ctx) {
       return runRoute(rest, flags, ctx)
     case 'skills':
       return runSkills(rest, flags, ctx)
+    case 'conflicts':
+      return runConflicts(rest, flags, ctx)
     case undefined:
     case 'help':
     case '--help':

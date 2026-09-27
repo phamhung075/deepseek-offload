@@ -667,6 +667,16 @@ three plus `none` with each `SKILL.md`'s first 60 lines in state. The output nam
 `<projectRoot>/.agents/skills` (`--skills-dir D` overrides); with fewer than two skills the command is
 skipped with one line. **The questions and thresholds were never measured — treat this as a hint.**
 
+**`jev conflicts` — cross-job finding conflicts (synthetic evaluation only).** Code extracts findings
+from each named job's result text (bullet/numbered lines, and sentences that cite a path), pairs only
+findings from **different jobs** that mention the **same file path**, and caps the work at
+`PAIRS_MAX` (60). Each pair gets one `contradicts` noul (verbatim from the known-answer evaluation,
+2026-09-27) and everything at or above `0.5` is reported with both finding texts shortened to 200
+characters and both job ids. The caveat `measured on synthetic contradictions only (AUC 0.997)` prints
+every time: the evaluation built contradicting pairs by code-negating real claims, so it measures
+literal contradiction detection, not real conflicting findings. **Use it to choose where to read, not
+to decide.**
+
 ---
 
 ## 9. Troubleshooting

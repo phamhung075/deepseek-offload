@@ -327,3 +327,54 @@ test('skills skips when fewer than two skills exist', async (t) => {
   assert.equal(stub.requests.length, 0)
 })
 
+// ---------------------------------------------------------------------------
+// Feature 4: `jev conflicts`
+// ---------------------------------------------------------------------------
+const { planPairs, extractFindings, PAIRS_MAX } = await import('../.agents/skills/deepseek-offload/scripts/jev/conflicts.mjs')
+
+/** Write a job record and its result text into the store the runner reads. */
+function writeJobWithResult(root, jobId, resultText) {
+  const jobsDir = path.join(root, 'jobs')
+  fs.mkdirSync(jobsDir, { recursive: true })
+  fs.writeFileSync(path.join(jobsDir, `${jobId}.json`), `${JSON.stringify({ jobId, state: 'done', prompt: 'x' })}\n`)
+  fs.writeFileSync(path.join(jobsDir, `${jobId}.result.md`), `${resultText}\n`)
+}
+
+test('conflicts pairs only findings from different jobs that share a path', async (t) => {
+  const root = scratch('conflicts')
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+  writeJobWithResult(root, 'job-a', '- The handler in `a.go:12` leaks a connection.\n- `b.go:4` skips validation.\n')
+  writeJobWithResult(root, 'job-b', '- `a.go:12` closes the connection correctly.\n- `c.go:9` is fine.\n')
+
+  const out = await run(['jev', 'conflicts', 'job-a', 'job-b'], env)
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(stub.requests.length, 1, 'only the shared a.go finding is paired')
+  assert.match(stub.requests[0].state.finding_a, /a\.go/)
+  assert.match(stub.requests[0].state.finding_b, /a\.go/)
+  assert.doesNotMatch(JSON.stringify(stub.requests[0]), /b\.go|c\.go/)
+  assert.match(out.stdout, /synthetic contradictions only \(AUC 0\.997\)/)
+  assert.match(out.stdout, /job-a/)
+  assert.match(out.stdout, /job-b/)
+})
+
+test('conflicts caps the pair list at PAIRS_MAX', () => {
+  const many = (jobId, count) => ({
+    jobId,
+    findings: Array.from({ length: count }, (_, index) => ({ text: `finding ${index} in shared.go`, paths: ['shared.go'] })),
+  })
+  const pairs = planPairs([many('job-a', 40), many('job-b', 40)])
+  assert.equal(PAIRS_MAX, 60)
+  assert.equal(pairs.length, PAIRS_MAX)
+})
+
+test('conflicts extracts bullet and prose findings that cite a path', () => {
+  const findings = extractFindings('Intro prose.\n\n- `a.go:1` is a bullet finding.\n\nA prose sentence about `b/c.rs:9` that cites a path. Another without one.\n')
+  const texts = findings.map((finding) => finding.text)
+  assert.ok(texts.some((text) => text.includes('a.go')), 'bullet line extracted')
+  assert.ok(texts.some((text) => text.includes('b/c.rs')), 'prose sentence extracted')
+  assert.ok(!texts.some((text) => text === 'Another without one.'), 'a sentence with no path is dropped')
+})
+
+

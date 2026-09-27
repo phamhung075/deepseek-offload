@@ -194,6 +194,22 @@ export const SKILL_WIDE_INSTRUCTIONS =
 export const SKILL_SHORTLIST_INSTRUCTIONS =
   'Exactly one of these skills is the right one to load for `request`; read what each actually does, not just its name. Choose `none` if none of them fits.'
 
+/**
+ * `finding_contradiction`, verbatim from the known-answer evaluation,
+ * 2026-09-27. Measured AUC 0.997 on SYNTHETIC pairs only (contradicting sides
+ * were code-negated copies of real claims), so `jev conflicts` prints that
+ * caveat and never treats the result as a decision.
+ */
+export const CONTRADICTS_ID = 'contradicts'
+export const CONTRADICTS_QUESTION = {
+  type: 'noul',
+  instructions: 'Do `finding_a` and `finding_b` make claims that cannot both be true?',
+  criteria: {
+    true: 'The two findings cannot both be true.',
+    false: 'The two findings can both be true.',
+  },
+}
+
 /** Choice id for the watch progress triage. */
 export const PROGRESS_ID = 'progress'
 
