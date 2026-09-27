@@ -1,10 +1,11 @@
 /**
- * Jev planning aids and the worker self-check: `jev route`, `jev skills`,
- * `jev conflicts`, the `.agents/mcp-jev` MCP server, and `start --jev-mcp`.
+ * Jev planning aids: `jev route`, `jev skills`, and `jev conflicts`, plus the
+ * lint wording fixes. The worker self-check server and `start --jev-mcp` live in
+ * `jev-selfcheck.test.mjs`.
  *
  * Every test points `TYPESAFE_API_URL` at a local HTTP stub and never calls the
- * real API. Like `jev.test.mjs`, the runner and the MCP server are launched
- * asynchronously, because the stub lives in this process.
+ * real API. Like `jev.test.mjs`, the runner is launched asynchronously, because
+ * the stub lives in this process.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -16,7 +17,6 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
-const MCP_MEV = fileURLToPath(new URL('../.agents/mcp-jev/server.cjs', import.meta.url))
 const SECRET_KEY = 'sk-test-SECRET-KEY-1234567890'
 
 /** A fresh root for one test; never touches the real job store or DSH home. */
@@ -376,5 +376,3 @@ test('conflicts extracts bullet and prose findings that cite a path', () => {
   assert.ok(texts.some((text) => text.includes('b/c.rs')), 'prose sentence extracted')
   assert.ok(!texts.some((text) => text === 'Another without one.'), 'a sentence with no path is dropped')
 })
-
-

@@ -210,6 +210,23 @@ export const CONTRADICTS_QUESTION = {
   },
 }
 
+/**
+ * `claim_support`, verbatim from the known-answer evaluation, 2026-09-27. The
+ * evaluation measured the judgment against the ±6 numbered lines at a claim's
+ * cited path: AUC 0.95, and at a threshold of 0.3 precision 0.905 / recall 0.826
+ * / accuracy 0.870. `jev_check_claims` reads those lines itself and flags a
+ * claim when `supported < 0.3`.
+ */
+export const CLAIM_SUPPORT_ID = 'supported'
+export const CLAIM_SUPPORT_QUESTION = {
+  type: 'noul',
+  instructions: 'Do the lines in `evidence` show what `claim` says about them?',
+  criteria: {
+    true: 'The evidence lines contain what the claim says about them.',
+    false: 'The evidence lines do not contain what the claim says about them.',
+  },
+}
+
 /** Choice id for the watch progress triage. */
 export const PROGRESS_ID = 'progress'
 

@@ -52,6 +52,11 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 // <repo>/.agents/skills/deepseek-offload/scripts -> <repo>/.agents
 const AGENTS_ROOT = path.resolve(SCRIPT_DIR, '..', '..', '..')
 const BRIDGE_SERVER = path.join(AGENTS_ROOT, 'mcp-deepseek', 'server.cjs')
+// The optional worker self-check MCP server `start --jev-mcp` mounts.
+const JEV_MCP_SERVER = path.join(AGENTS_ROOT, 'mcp-jev', 'server.cjs')
+// The one sentence `--jev-mcp` appends to the job's prompt.
+const JEV_MCP_PROMPT_SENTENCE =
+  'Before your final answer, you may call jev_check_claims on the file:line claims you make and jev_check_scope on your diff; fix or drop what they flag.'
 // The project the jobs belong to: the caller's directory. Job records and result
 // files live under it, so a project that vendors this repository keeps its own
 // job history.
@@ -120,6 +125,32 @@ function writeJsonAtomic(file, value) {
   const tmp = `${file}.tmp-${process.pid}`
   fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`)
   fs.renameSync(tmp, file)
+}
+
+/** Read a client-shaped MCP config (`{mcpServers}` or a bare server map). */
+function readMcpServerMap(file) {
+  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const map = parsed && typeof parsed === 'object' && parsed.mcpServers !== undefined ? parsed.mcpServers : parsed
+  if (map === null || typeof map !== 'object' || Array.isArray(map)) {
+    throw new Error(`${file} does not contain an MCP server map`)
+  }
+  return map
+}
+
+/**
+ * Merge the jev self-check server into a job's MCP config and write the merged
+ * config beside the job record. `--mcp-config` servers are included when given.
+ * @returns the absolute merged config path.
+ */
+function writeJevMcpConfig(jobId, mcpConfig) {
+  const servers = {}
+  if (typeof mcpConfig === 'string' && mcpConfig !== '' && fs.existsSync(mcpConfig)) {
+    Object.assign(servers, readMcpServerMap(mcpConfig))
+  }
+  servers.jev = { command: process.execPath, args: [JEV_MCP_SERVER] }
+  const merged = path.join(JOBS_DIR, `${jobId}.mcp.json`)
+  writeJsonAtomic(merged, { mcpServers: servers })
+  return merged
 }
 
 function readJob(jobId) {
@@ -1135,6 +1166,20 @@ async function commandStart(positional, flags) {
   const deferredUntil = flags['defer-to-off-peak'] === true && isPeakAt(now) ? nextOffPeakStart(now) : null
 
   const jobId = newJobId()
+
+  // The optional worker self-check: mount .agents/mcp-jev beside any config the
+  // caller passed, and append the one prompt sentence that tells the worker the
+  // tools exist. The merged config lives in the jobs dir with the job record.
+  if (flags['jev-mcp'] === true) {
+    if (!fs.existsSync(JEV_MCP_SERVER)) fail(`--jev-mcp server not found: ${JEV_MCP_SERVER}`)
+    prompt = `${prompt}\n\n${JEV_MCP_PROMPT_SENTENCE}`
+    try {
+      mcpConfig = writeJevMcpConfig(jobId, mcpConfig)
+    } catch (error) {
+      fail(`--jev-mcp could not write the merged MCP config: ${error.message}`)
+    }
+  }
+
   const record = {
     jobId,
     label: typeof flags.label === 'string' ? flags.label : null,
@@ -2224,6 +2269,12 @@ function usage() {
                                    before dispatch and print its warnings; advisory
                                    only (never blocks the start); also enabled by
                                    DSH_OFFLOAD_JEV_LINT=1
+                                 # -- worker self-check (own block) --
+                                 --jev-mcp  mount the Jev self-check MCP server
+                                   (.agents/mcp-jev/server.cjs) and append its
+                                   one-sentence prompt hint; when --mcp-config is
+                                   also given its servers are merged in. UNVALIDATED
+                                   loop; no key makes the tools say "Jev disabled"
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
   resume <jobId> ["<extra>"]   continue an interrupted job's session in a new job

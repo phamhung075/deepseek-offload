@@ -162,7 +162,10 @@ against its work order, exiting `3` when it wants a closer look; `jev claims` ch
 `path:line` claims against ±6 evidence lines; `jev lint` gives an advisory work-order check
 (`start --jev-lint` runs it automatically); `jev watch` triages a running job's progress and exits
 `4` on a problem, and `wait --jev-watch` reuses it for an early return; `jev decide`/`jev log` record
-accept/reject/partial labels so the thresholds can be measured on real data. `start --review-repo <the
+accept/reject/partial labels so the thresholds can be measured on real data. Three more commands only
+suggest: `jev route` ranks the roster roles that fit a work order, `jev skills` ranks project skills,
+and `jev conflicts` flags cross-job findings that share a path; `start --jev-mcp` mounts
+`.agents/mcp-jev/server.cjs` so the worker can check its own claims and diff. `start --review-repo <the
 clone the job changes>` runs that same review automatically when the job settles, so `result` and
 `wait` arrive with the look-here block already attached. `jev triage` reports the failure kind for an
 errored job. Without a key every jev feature is skipped with one line, and no other command changes

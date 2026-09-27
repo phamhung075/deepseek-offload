@@ -14,7 +14,9 @@ description: >-
   commits and pushes by default, the `--read-only` file policy for investigation jobs,
   the optional TypeSafe Jev pre-screen (`jev review` with code-enforced hard rules, `jev claims`,
   `jev lint`, `jev watch`, `jev triage`, `jev decide`/`jev log`) that
-  flags a diff to look at before the orchestrator reviews it, and the security and
+  flags a diff to look at before the orchestrator reviews it, the optional planning
+  aids (`jev route`, `jev skills`, `jev conflicts`) and the worker self-check server
+  `.agents/mcp-jev/server.cjs` mounted by `start --jev-mcp`, and the security and
   token rules.
 ---
 
@@ -289,12 +291,16 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `jev decide` | Records an `accept`/`reject`/`partial` label for a job's review in `jev-log.jsonl`. Pure local. | `0`, `1` error |
 | `jev log` | Decision counts, flagged/clean agreement, and a `P(none)` what-if at 0.4/0.5/0.6. Pure local. | `0` |
 | `jev triage` | Failure triage: code rules first, one **UNVALIDATED** `failure_kind` otherwise. Never auto-resumes. | `0`, `1` error |
+| `jev route` | Optional role suggestion from a roles file (measured 2026-09-27: 40.9% top-1 / 54.5% top-2). Suggests only. | `0`, `1` error |
+| `jev skills` | Optional, **UNVALIDATED** skill suggestion over `<skills-dir>/*/SKILL.md`. Suggests only. | `0`, `1` error |
+| `jev conflicts` | Optional cross-job finding conflict check (synthetic evaluation only, AUC 0.997). Suggests only. | `0`, `1` error |
 
 Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-config FILE`,
 `--prompt-file FILE` / `-f FILE` (for `start`), `--label NAME`, `--permission allow|reject`,
 `--allow-git-write`, `--read-only`, `--timeout-ms N`,
 `--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`),
 `--jev-lint` (run the optional, UNVALIDATED Jev lint before a `start`),
+`--jev-mcp` (mount the worker self-check server on a `start`),
 `--review-repo DIR` / `--review-base REV` / `--no-jev-review` (optional auto-review on `start`/`resume`),
 `--jev-exit` and `--no-jev-review` (on `result`/`wait`),
 `--jev-watch` / `--watch-interval-ms N` (optional early-return watch on `wait`),
@@ -677,6 +683,26 @@ every time: the evaluation built contradicting pairs by code-negating real claim
 literal contradiction detection, not real conflicting findings. **Use it to choose where to read, not
 to decide.**
 
+**Worker self-check MCP server (`start --jev-mcp`, UNVALIDATED loop).** `.agents/mcp-jev/server.cjs`
+is a zero-dependency MCP stdio server the worker itself calls. `start --jev-mcp` merges it into the
+job's MCP config (the merged config is written beside the job record, and any `--mcp-config` servers
+are kept) and appends one sentence to the prompt: *Before your final answer, you may call
+jev_check_claims on the file:line claims you make and jev_check_scope on your diff; fix or drop what
+they flag.* The two tools:
+
+- `jev_check_claims {claims: [{claim, path, line}], repo?}` — the **server** reads the ±6
+  working-tree lines at each cited path itself and never accepts evidence text from the caller; it
+  returns each claim's support probability with a verdict at `0.3`. The underlying `claim_support`
+  question is measured (2026-09-27: AUC 0.95; at 0.3 precision 0.905, recall 0.826, accuracy 0.870).
+- `jev_check_scope {work_order, repo?, base?}` — reuses `jev review` (no duplicated detectors) over
+  `base..HEAD` plus untracked files and returns the flagged groups and look-here hunks. Pass the base
+  commit; `base` defaults to `HEAD`, which then reviews untracked files only.
+
+`repo` defaults to the server's working directory. **The self-check loop as a whole is UNVALIDATED**
+(the questions it reuses are measured). With no key both tools return a clear `Jev disabled` text
+result, never an error, so a worker keeps going. The installer links `.agents/mcp-jev/server.cjs` the
+same way it links `.agents/mcp-deepseek/server.cjs`.
+
 ---
 
 ## 9. Troubleshooting
@@ -710,3 +736,4 @@ to decide.**
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.
 - [../../mcp-deepseek/git-guard.cjs](../../mcp-deepseek/git-guard.cjs) — the git write guard the bridge installs before spawning a job.
 - [../../mcp-deepseek/README.md](../../mcp-deepseek/README.md) — bridge setup and env vars.
+- [../../mcp-jev/server.cjs](../../mcp-jev/server.cjs) — the worker self-check MCP server `start --jev-mcp` mounts.

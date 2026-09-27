@@ -336,7 +336,9 @@ export TYPESAFE_API_KEY=<key>        # or the workspace TYPESAFE_AI_API
 
 Pass `start --review-repo <the clone the job changes>` (or resume it) and the review runs
 automatically when the job settles, so `result`/`wait` print the look-here block — that clone's
-untracked files are reviewed too.
+untracked files are reviewed too. The planning aids `jev route`, `jev skills`, and `jev conflicts`
+only suggest (roles, skills, cross-job finding conflicts), and `start --jev-mcp` mounts the
+`.agents/mcp-jev` self-check server for the worker.
 
 With no key every jev command prints one line (`jev: disabled — set TYPESAFE_API_KEY`) and exits 0,
 and no other command changes. The key is never printed, logged, or persisted. Jev is a pre-screen,
