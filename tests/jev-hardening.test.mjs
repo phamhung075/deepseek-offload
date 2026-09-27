@@ -19,6 +19,7 @@ import { globMatch, extractNamedPaths, isTestSibling, isUnderNamedPath } from '.
 import { extractClaims } from '../.agents/skills/deepseek-offload/scripts/jev/claims.mjs'
 import { TRIAGE_RULES, matchRule } from '../.agents/skills/deepseek-offload/scripts/jev/triage.mjs'
 import { summarizeLog, minPNone } from '../.agents/skills/deepseek-offload/scripts/jev/decide.mjs'
+import { jevFreeEnv } from './helpers/jev-env.mjs'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 const SECRET_KEY = 'sk-test-SECRET-KEY-hardening'
@@ -174,9 +175,7 @@ function answerFor(parsed) {
 }
 
 function baseEnv(root, url, { key = SECRET_KEY } = {}) {
-  const env = { ...process.env }
-  delete env.TYPESAFE_API_KEY
-  delete env.TYPESAFE_AI_API
+  const env = jevFreeEnv()
   if (key !== null) env.TYPESAFE_API_KEY = key
   env.TYPESAFE_API_URL = url
   env.DSH_OFFLOAD_JOB_DIR = root

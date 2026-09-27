@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { renderJevBlock } from '../.agents/skills/deepseek-offload/scripts/jev/auto.mjs'
+import { jevFreeEnv } from './helpers/jev-env.mjs'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 const SECRET_KEY = 'sk-test-SECRET-KEY-jev-auto'
@@ -127,9 +128,7 @@ function answerFor(parsed) {
 
 /** The environment the runner and its worker inherit. */
 function baseEnv(fx, url, { key = SECRET_KEY } = {}) {
-  const env = { ...process.env }
-  delete env.TYPESAFE_API_KEY
-  delete env.TYPESAFE_AI_API
+  const env = jevFreeEnv()
   if (key !== null) env.TYPESAFE_API_KEY = key
   env.TYPESAFE_API_URL = url
   env.DSH_OFFLOAD_JOB_DIR = fx.jobRoot

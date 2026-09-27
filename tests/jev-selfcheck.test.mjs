@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { jevFreeEnv } from './helpers/jev-env.mjs'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 const MCP_JEV = fileURLToPath(new URL('../.agents/mcp-jev/server.cjs', import.meta.url))
@@ -79,9 +80,7 @@ function answerFor(parsed) {
  * set by default so Jev is enabled; pass `{ key: null }` for the no-key path.
  */
 function baseEnv(root, url, { key = SECRET_KEY } = {}) {
-  const env = { ...process.env }
-  delete env.TYPESAFE_API_KEY
-  delete env.TYPESAFE_AI_API
+  const env = jevFreeEnv()
   if (key !== null) env.TYPESAFE_API_KEY = key
   env.TYPESAFE_API_URL = url
   env.DSH_OFFLOAD_JOB_DIR = root

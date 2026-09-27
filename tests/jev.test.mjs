@@ -20,6 +20,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { callJev } from '../.agents/skills/deepseek-offload/scripts/jev/client.mjs'
+import { jevFreeEnv } from './helpers/jev-env.mjs'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 const SECRET_KEY = 'sk-test-SECRET-KEY-1234567890'
@@ -81,9 +82,7 @@ function answerFor(parsed) {
  * set by default so Jev is enabled; pass `{ key: null }` for the no-key path.
  */
 function baseEnv(root, url, { key = SECRET_KEY } = {}) {
-  const env = { ...process.env }
-  delete env.TYPESAFE_API_KEY
-  delete env.TYPESAFE_AI_API
+  const env = jevFreeEnv()
   if (key !== null) env.TYPESAFE_API_KEY = key
   env.TYPESAFE_API_URL = url
   // The runner treats DSH_OFFLOAD_JOB_DIR as the job root and appends `jobs/`.

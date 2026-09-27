@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { jevFreeEnv } from './helpers/jev-env.mjs'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 
@@ -61,7 +62,7 @@ function run(fx, args) {
     encoding: 'utf8',
     timeout: 60_000,
     env: {
-      ...process.env,
+      ...jevFreeEnv(),
       HOME: fx.root,
       DSH_HOME: path.join(fx.root, 'dsh-home'),
       DSH_BIN: fx.stub,

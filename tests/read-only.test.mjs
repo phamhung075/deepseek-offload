@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { jevFreeEnv } from './helpers/jev-env.mjs'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 
@@ -14,7 +15,7 @@ function scratch(name) {
   return {
     root,
     env: {
-      ...process.env,
+      ...jevFreeEnv(),
       DSH_OFFLOAD_JOB_DIR: root,
       DSH_HOME: path.join(root, 'dsh-home'),
       // No real Harness in a test: the worker's bridge child must exit at once.
