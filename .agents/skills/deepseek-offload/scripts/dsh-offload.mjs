@@ -2315,8 +2315,9 @@ function usage() {
                                against its work order; exit 3 when flagged, 0 when
                                clean, and writes <jobId>.jev-review.json
   jev lint --prompt-file F [--read-only] [--json]
-                               brief, UNVALIDATED work-order check (advisory,
-                               always exit 0)
+                               brief, UNVALIDATED work-order check (advisory;
+                               exit 0, or 1 on a missing prompt file or API
+                               failure)
   jev watch <jobId> [--interval-ms N] [--timeout-ms N]
                                UNVALIDATED progress triage; exit 4 on a
                                looping/blocked/off-task verdict, run it with

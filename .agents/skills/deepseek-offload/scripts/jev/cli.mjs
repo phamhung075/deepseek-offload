@@ -25,7 +25,8 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
   jev lint --prompt-file F [--read-only] [--json]
                                brief, advisory work-order check (wording
                                measured 2026-09-27, code checks unvalidated);
-                               always exits 0. Enables start --jev-lint.
+                               exit 0, or 1 on a missing prompt file or an
+                               outright API failure. Enables start --jev-lint.
   jev watch <jobId> [--interval-ms N] [--timeout-ms N]
                                UNVALIDATED progress triage; exit 4 on a
                                looping/blocked/off-task verdict, 0 on settle.

@@ -12,7 +12,8 @@ description: >-
   how to follow a running job (the web GUI lists its session but cannot show it
   live), prompt contracts for self-contained jobs, the git write guard that refuses
   commits and pushes by default, the `--read-only` file policy for investigation jobs,
-  the optional TypeSafe Jev pre-screen (`jev review` with code-enforced hard rules, `jev claims`,
+  the optional TypeSafe Jev pre-screen (`start --review-repo` auto-review, `jev review` with
+  code-enforced hard rules, `jev claims`,
   `jev lint`, `jev watch`, `jev triage`, `jev decide`/`jev log`) that
   flags a diff to look at before the orchestrator reviews it, the optional planning
   aids (`jev route`, `jev skills`, `jev conflicts`) and the worker self-check server
@@ -143,7 +144,9 @@ Claude Code / Gemini / Codex / any MCP client
         │  (path A) MCP over stdio            (path B) shell
         ▼                                            ▼
  .agents/mcp-deepseek/server.cjs  ◄── .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (background job runner)
-        │  spawns `dsh --profile acp`
+        │  spawns `dsh --profile acp`            │  optional Jev (with a key):
+        │                                        ├─ scripts/jev/*.mjs ──HTTPS──▶ TypeSafe System One
+        │                                        └─ .agents/mcp-jev/server.cjs (worker self-check)
         ▼
  DeepSeek Harness agent, model deepseek-flash
         │  session persisted to DSH_HOME
@@ -155,6 +158,8 @@ Claude Code / Gemini / Codex / any MCP client
 - It spawns `dsh --profile acp` from `DSH_ROOT` (default `~/deepseek-harness`).
 - It shares `DSH_HOME` with the web GUI, which is what puts every session in the GUI's
   session list. The GUI reads that list cold: it cannot show a session running elsewhere.
+- The optional Jev layer never touches a job's state: `scripts/jev/*.mjs` are lazily imported by the
+  runner, and `.agents/mcp-jev/server.cjs` is an MCP server the worker calls itself.
 
 ---
 
@@ -448,28 +453,55 @@ original session in the GUI.
 
 ## Jev judgments (optional)
 
-[TypeSafe System One (Jev)](https://docs.typesafe.ai/) turns a semantic question into a
-probability code can branch on. Three subcommands add judgments around a delegation. **Jev is a
-pre-screen; the orchestrator still reviews every diff.** Jev never approves anything, and nothing
-here replaces the review rule above.
+[TypeSafe System One (Jev)](https://docs.typesafe.ai/) turns a narrow semantic question into a
+calibrated probability code can branch on. In this package it is **optional and advisory**: with
+`TYPESAFE_API_KEY` (or the workspace `TYPESAFE_AI_API`) set, the `jev` subcommands and the
+auto-review add typed judgments around a delegation; without a key every jev command that calls the
+API is skipped with one line and no other command changes. **Jev is a pre-screen — the orchestrator
+still reviews every diff.** It never approves, blocks, dispatches, or resumes anything, and nothing
+here replaces the mandatory rules in §8. Measurements are from a known-answer evaluation, 2026-09-27;
+anything else is labelled UNVALIDATED.
 
-**Key setup.** Jev is optional. It enables when `TYPESAFE_API_KEY` (or the workspace
-`TYPESAFE_AI_API`) is set; with no key every jev feature is skipped with one line — `jev: disabled
-— set TYPESAFE_API_KEY` — and no other command changes behaviour. The key is read from the
-environment on each call, never printed, logged, or written to a report. `TYPESAFE_API_URL`
-overrides the endpoint (tests use a local stub).
+### Overview and evidence
+
+| Stage | Command | What it answers | Evidence status |
+| :--- | :--- | :--- | :--- |
+| Diff review | `jev review <jobId> --repo DIR --base REV` | Does a hunk or commit fall outside the work order? | measured: smuggled hunk caught 32/33, 1/33 clean false alarms; per-hunk `in_scope` AUC 0.968–0.973 |
+| Auto-review at settle | `start --review-repo DIR` / `resume … --review-repo DIR` | The same review, run by the worker when the job settles | as `jev review` |
+| Report claims | `jev claims <jobId> --repo DIR` | Do the cited lines support the sentence? | measured: AUC 0.950 on 46+46 claims; threshold 0.3 → precision 0.905 / recall 0.826 |
+| Work-order lint | `jev lint --prompt-file F`, `start --jev-lint` | Is the brief self-contained, one outcome, write policy stated? | wording measured on 22 real work orders (0–4.5% false warnings); code checks UNVALIDATED |
+| Progress watch | `jev watch <jobId>`, `wait --jev-watch` | Is the run looping, blocked, or off-task? | UNVALIDATED |
+| Failure triage | `jev triage <jobId>` | Code rules first; a Jev failure kind only when no rule matches | code rules deterministic; Jev branch UNVALIDATED |
+| Role routing | `jev route --prompt-file F` | Which role fits, background vs blocking, off-peak? | measured 40.9% top-1 / 54.5% top-2 on 22 orders; `can_defer`/`needs_background` UNVALIDATED |
+| Skill suggestion | `jev skills --prompt-file F` | Which project skill to attach? | UNVALIDATED |
+| Cross-job conflicts | `jev conflicts <jobId> <jobId> ...` | Do findings from different jobs contradict each other? | measured on synthetic contradictions only, AUC 0.997 |
+| Decision log | `jev decide <jobId> …`, `jev log` | Accept/reject/partial labels and flagged/clean agreement | local; no key needed |
+
+The question wordings these judgments use live in
+[`scripts/jev/questions.mjs`](scripts/jev/questions.mjs): the `in_scope`, `unrequested`, and
+`odd_hunk` texts are verbatim from the known-answer evaluation. **Change a wording and its threshold
+must be re-measured before it is trusted.**
+
+### Setup
+
+- The key is read from the environment on every call and is never printed, logged, or persisted;
+  `TYPESAFE_API_URL` overrides the endpoint (the tests point it at a local stub).
+- With no key every jev command that calls the API prints `jev: disabled — set TYPESAFE_API_KEY` and
+  exits 0; the pure-local `jev decide`/`jev log` need no key, and the auto-review records
+  `jevReview.state = 'disabled'` and makes no request.
 
 ```sh
 export TYPESAFE_API_KEY=<key>          # or TYPESAFE_AI_API
 OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
 ```
 
-**Auto-review on start (the default screen).** `start --review-repo DIR` points at the clone the
-job changes. The runner resolves `DIR` to its git work-tree root and stores that plus the commit it
-started from (`--review-base REV`, default `HEAD`, taken before the worker spawns). When the job
-settles the worker runs the same `jev review` in-process, writes `<jobId>.jev-review.json`, and
-records `jevReview` on the job. `result` and `wait` then append the block, so every result arrives
-pre-screened:
+### Review
+
+**Automatic (`start --review-repo DIR`).** `DIR` is the clone the job changes. The runner resolves it
+to its git work-tree root and stores that plus the commit it started from (`--review-base REV`,
+default `HEAD`, taken before the worker spawns). When the job settles the worker runs the same `jev
+review` in-process, writes `<jobId>.jev-review.json`, and records `jevReview` on the job; `result`
+and `wait` then append the compact block, so every result arrives pre-screened:
 
 ```
 --- jev review (pre-screen; the orchestrator still reviews every diff) ---
@@ -480,29 +512,68 @@ report: scratch/dsh-offload/jobs/<jobId>.jev-review.json
 ```
 
 - `--review-repo DIR` must be the clone or worktree the job changes; its **untracked files are
-  reviewed too**, so never point it at a shared tree you do not want judged. There is deliberately
-  no `--cwd` fallback (a job usually changes a separate clone). `DSH_OFFLOAD_REVIEW_REPO=DIR` sets
-  the default; `--no-jev-review` disables auto-review for one job even when the env var is set. A
-  `DIR` that is not a git work tree warns once and starts the job without auto-review — a bad
-  target never blocks a start.
-- `resume` copies `reviewRepo`/`reviewBase` from the job it resumes (the base stays the original
-  start commit) unless it passes its own `--review-repo`/`--review-base`.
-- **The block is a look-here list, not an approval.** Read the diff and sign off yourself.
+  reviewed too**, so never point it at a shared tree you do not want judged. There is deliberately no
+  `--cwd` fallback (a job usually changes a separate clone). `DSH_OFFLOAD_REVIEW_REPO=DIR` sets the
+  default; `--no-jev-review` disables auto-review for one job even when the env var is set. A `DIR`
+  that is not a git work tree warns once and starts the job without auto-review — a bad target never
+  blocks a start.
+- `resume` copies `reviewRepo`/`reviewBase` from the job it resumes (the base stays the original start
+  commit) unless it passes its own `--review-repo`/`--review-base`.
+- The block is a **look-here list, not an approval**: rule findings first, then one line per commit
+  group, the lowest-`in_scope` hunks, any `claims to verify`, and the report path. Read the diff and
+  sign off yourself.
 - Exit codes of `result`/`wait` are unchanged; add `--jev-exit` to exit `3` when the review flagged.
-  `--no-jev-review` on `result`/`wait` suppresses the block. `--json` carries a `jevReview` field
-  instead of the text block.
-- With no key the block degrades to `jev review: disabled — set TYPESAFE_API_KEY` and
-  `jevReview.state = 'disabled'`; no request is made. A review that fails or times out (bounded by
-  `AUTO_REVIEW_TIMEOUT_MS`, 180000 ms) records `jevReview.state = 'error'` and never changes the
-  job's own state or exit code. `status` prints one `jev review  <state>` line when the job has a
-  review clone.
+  `--no-jev-review` on `result`/`wait` suppresses the block; `--json` carries a `jevReview` field
+  instead of the text. `status` prints one `jev review  <state>` line when the job has a review clone.
+- States: `clean`, `flagged`, `disabled` (no key), `running` (the worker is still reviewing), `empty`
+  (the review range held no changes), and `error`. A review that fails or times out (bounded by
+  `AUTO_REVIEW_TIMEOUT_MS`, 180000 ms) records `state = 'error'` and never changes the job's own state
+  or exit code.
+
+**Manual.** Reviews a job's diff against its work order, grouped one request per commit plus one for
+untracked files, and writes `<jobId>.jev-review.json` beside the job record. The untracked group
+includes **every** untracked, non-ignored file in the repository, so run review in the job's own
+clean clone or worktree — stray files in a shared working tree get reviewed too. Two detectors from
+the known-answer evaluation:
+
+- **Detector B (whole group):** one `choice` question, `odd_hunk`, with one option per hunk
+  (`h0..hN`) plus `none`. Flag when `P(none) < 0.5`. Each request is capped at 7 hunks, the measured
+  group size (6 own + 1 smuggled); a larger group is split into measured-size requests.
+- **Detector A (per hunk):** the `in_scope` and `unrequested` nouls. The look-here list is the two
+  lowest-`in_scope` hunks of each flagged group, plus any hunk with `changed_lines >= 5` and
+  `in_scope < 0.3` anywhere. Report whole-job drift when the mean `in_scope` over all hunks is below
+  `0.5`.
+
+Measured on that set (smuggled same-area hunks; thresholds chosen on the same data — treat the
+numbers as a guide, not a guarantee): the whole-commit `odd_hunk` caught the smuggled hunk 32/33 at
+`P(none) < 0.5` with 1/33 clean false alarms; the per-hunk `in_scope` scored AUC 0.968–0.973. The
+shipped threshold is the measured `0.5`: a `0.6` margin was dropped after a live check flagged 2 of 5
+legitimate real commits with it. Commit-mean `in_scope` catches whole-job drift but not a single
+smuggled hunk, which is why B and A are separate.
+
+```sh
+node "$OFF" jev review <jobId> --repo "$PWD" --base <old-sha> [--head <new-sha>] [--json]
+node "$OFF" jev review --prompt-file task.md --repo "$PWD" --base <old-sha>
+# exit 0 = clean, 3 = flagged (branch on this), 1 = error
+```
+
+For a resumed job, `review` follows `resumeOf` back to the original job's prompt. Use its `look here`
+list (or `report.lookHere` in `--json`) as the starting point for your own review — it ranks where to
+look; it does not decide.
+
+**Observed limit (known-answer evaluation, 2026-09-27).** A job whose work order describes its changes
+only by reference — replay or merge another branch's commits, or "merge duplicated logic" in general
+terms — gets its legitimate hunks flagged, because the review can only judge hunks against the text
+it is given. For such jobs, review against the original work orders (`jev review --prompt-file
+<original order>` per replayed range) and treat the flags as a look-here list, not as findings.
 
 **Hard rules (code, not Jev — they run first).** Jev 1.13 can be steered by state content and loses
 accuracy on irrelevant state, so the rules that must not depend on a model live in
-`scripts/jev/rules.mjs`. `jev review` and the auto-review evaluate them BEFORE any Jev call and
-report their findings first as `rule` lines; a `flag` rule makes the review flagged even when Jev
-would have been clean (Jev is then skipped entirely, so a rule-only flag costs zero requests).
-Config is `<projectRoot>/.agents/jev.json` (override the path with `DSH_OFFLOAD_JEV_CONFIG`):
+[`scripts/jev/rules.mjs`](scripts/jev/rules.mjs). `jev review` and the auto-review evaluate them
+BEFORE any Jev call and report their findings first as `rule` lines; a `flag` rule makes the review
+flagged even when Jev would have been clean (Jev is then skipped entirely, so a rule-only flag costs
+zero requests). Config is `<projectRoot>/.agents/jev.json` (override the path with
+`DSH_OFFLOAD_JEV_CONFIG`):
 
 ```json
 {
@@ -524,85 +595,55 @@ Config is `<projectRoot>/.agents/jev.json` (override the path with `DSH_OFFLOAD_
 A missing file means defaults. A malformed one prints one warning line (`... using defaults`) and the
 review still runs; it never crashes.
 
-**`jev review` — diff scope pre-screen (measured).** Reviews a job's diff against its work order
-(grouped one request per commit plus one for untracked files), and writes
-`<jobId>.jev-review.json` beside the job record. The untracked group includes **every** untracked,
-non-ignored file in the repository, so run review in the job's own clean clone or worktree — stray
-files in a shared working tree get reviewed too. It runs two detectors from a known-answer
-evaluation on 33 real worker commits:
-
-- **Detector B (whole group):** one `choice` question, `odd_hunk`, with one option per hunk
-  (`h0..hN`) plus `none`. Flag when `P(none) < 0.5`.
-- **Detector A (per hunk):** the `in_scope` and `unrequested` nouls. The look-here list is the two
-  lowest-`in_scope` hunks of each flagged group, plus any hunk with `changed_lines >= 5` and
-  `in_scope < 0.3` anywhere. Report whole-job drift when the mean `in_scope` over all hunks is
-  below `0.5`.
-
-Measured on that set (same-area smuggled hunks, thresholds chosen on the same data — treat the
-numbers as a guide, not a guarantee): the whole-commit `odd_hunk` caught the smuggled hunk 32/33 at
-`P(none) < 0.5` with 1/33 clean false alarms (that one at `P(none)=0.49`); the per-hunk `in_scope`
-put the smuggled hunk among the two lowest 33/33. Each measured group was capped at 7 hunks (6 own
-+ 1 smuggled), and the shipped cap is the same 7, so a larger group is split into measured-size
-requests. The shipped threshold is the measured `0.5`: a `0.6` margin was dropped after a live check
-flagged 2 of 5 legitimate real commits with it. Commit-mean `in_scope` catches whole-job drift but
-not a single smuggled hunk, which is why B and A are separate.
-
-```sh
-node "$OFF" jev review <jobId> --repo "$PWD" --base <old-sha> [--head <new-sha>] [--json]
-node "$OFF" jev review --prompt-file task.md --repo "$PWD" --base <old-sha>
-# exit 0 = clean, 3 = flagged (branch on this), 1 = error
-```
-
-For a resumed job, `review` follows `resumeOf` back to the original job's prompt. Use its
-`look here` list (or `report.lookHere` in `--json`) as the starting point for your own review — it
-ranks where to look; it does not decide.
-
-Observed limit (2026-09-27, first automatic review of a real job): a job whose work order describes its changes only by reference — replay or merge another branch's commits, or "merge duplicated logic" in general terms — gets its legitimate hunks flagged (4 of 7 commits in that job), because the review can only judge hunks against the text it is given. For such jobs, review against the original work orders (`jev review --prompt-file <original order>` per replayed range) and treat the flags as a look-here list, not as findings.
-
-**`jev claims` — report claim check (measured).** Code extracts the report's own `path:line` /
-`path:~line` / `path:line-line` citations with the sentence that carries each one, then reads ±6 lines
-at `--rev` (default the job's reviewed head, `HEAD` of the review repo) with `git show REV:path`. One
-`noul`, `supported` — instructions and criteria verbatim from the known-answer evaluation, 2026-09-27
-(AUC 0.950, precision 0.905 / recall 0.826) — judges whether those lines say what the sentence claims;
-a score below the measured threshold `0.3` lists the claim under **claims to verify**. Missing files
-are skipped and counted, and at most `CLAIMS_MAX = 40` claims are checked per job. Claims are a
-separate signal: they never flag the diff review, but they set `jevReview.claimsFlagged`. The
-auto-review runs the check automatically whenever the job's result text contains citations.
+**Claims (`jev claims`, measured).** Code extracts the report's own `path:line` / `path:~line` /
+`path:line-line` citations with the sentence that carries each one, then reads ±6 lines at `--rev`
+(default the reviewed head, `HEAD` of the review repo) with `git show REV:path`. One noul,
+`supported` — instructions and criteria verbatim from the known-answer evaluation, 2026-09-27 (AUC
+0.950 on 46+46 claims) — judges whether those lines say what the sentence claims; a score below the
+measured threshold `0.3` lists the claim under **claims to verify** (at 0.3: precision 0.905, recall
+0.826). Missing files are skipped and counted, and at most `CLAIMS_MAX = 40` claims are checked per
+job. Claims are a separate signal: they never flag the diff review, but they set
+`jevReview.claimsFlagged`. The auto-review runs the check automatically whenever the job's result text
+contains citations; the report is stored as `<jobId>.jev-claims.json`.
 
 ```sh
 node "$OFF" jev claims <jobId> --repo "$PWD" [--rev <sha>] [--json]
 ```
 
-**`jev decide` / `jev log` — labels, so the thresholds can be measured.** `jev decide <jobId>
-accept|reject|partial [--note TEXT]` writes `<jobId>.jev-decision.json` and appends one JSONL line to
-`<jobsDir>/jev-log.jsonl` carrying the label plus the review facts (`state`, `flaggedGroups`,
-`ruleHits`, `claimsFlagged`, `pNoneMin`). `jev log [--json]` prints decision counts and the
-flagged/clean-versus-decision agreement (flagged∧rejected, flagged∧accepted, clean∧rejected,
+### Decide / log
+
+`jev decide <jobId> accept|reject|partial [--note TEXT]` writes `<jobId>.jev-decision.json` and
+appends one JSONL line to `<jobsDir>/jev-log.jsonl` carrying the label plus the review facts (`state`,
+`flaggedGroups`, `ruleHits`, `claimsFlagged`, `pNoneMin`). `jev log [--json]` prints decision counts
+and the flagged/clean-versus-decision agreement (flagged∧rejected, flagged∧accepted, clean∧rejected,
 clean∧accepted), plus a what-if for a `P(none)` threshold at `0.4`/`0.5`/`0.6` replayed from the
 stored reports. It is pure local and needs no key. Labels are the only way to retune the thresholds on
 real data instead of guessing — the shipped numbers came from one 33-commit set.
 
-**`jev lint` — work-order pre-check (measured wording, advisory).** Deterministic checks first (word
-budget, a named path, an output-format/word-budget phrase), then one Jev request with four nouls:
-`single_outcome`, `self_contained`, `write_policy_stated`, and `is_investigation`. On a known-answer
-evaluation, 2026-09-27, run over 22 real work orders (their negatives synthetic): the v2
-`self_contained` wording warns on **4.5%** of the real orders (the earlier wording warned on 63.6%),
-and `write_policy_stated` and `is_investigation` warn on **0%** of them. `single_outcome` is still
-asked, but its bad side is reported as **information, not a warning**, because 59.1% of the real
-orders bundle numbered items and trip it. The two warnings are `self_contained` and
-`write_policy_stated` below `0.5`; when `is_investigation >= 0.5` without `--read-only` the lint
-advises passing `--read-only`. **The code checks are unvalidated, so the lint is a hint, not a
-gate.** It always exits `0` (advisory) except on a read error. `start --jev-lint` runs the same lint
-on the prompt before dispatch and never blocks the start; `DSH_OFFLOAD_JEV_LINT=1` enables it by
-default.
+### Lint
 
-**`jev watch` — progress triage (UNVALIDATED).** Every interval (default 120000 ms, `--interval-ms`)
-it re-reads the job state; a settled job exits `0` immediately. Otherwise it reads the newest
-activity lines through `session-tail.mjs` and asks one `choice` question, `progress`
-(`progressing` / `looping` / `blocked_env` / `off_task` / `finished`). It keeps watching while the
-verdict is `progressing` or confidence is below `0.6`; a confident `looping`, `blocked_env`, or
-`off_task` prints the verdict, confidence, and the last five activity lines and exits `4`. Timeout
-(`--timeout-ms`, default 1 hour) exits `5`. **Also unvalidated.** This is the command to wrap in
+**`jev lint --prompt-file F [--read-only] [--json]`** (measured wording, advisory; exit `0`, or `1`
+on a missing prompt file or an outright API failure). Deterministic checks first (word budget, a named
+path, an output-format/word-budget phrase), then one Jev request with four nouls: `single_outcome`,
+`self_contained`, `write_policy_stated`, and `is_investigation`. On a known-answer evaluation,
+2026-09-27, over 22 real work orders (their negatives synthetic): the v2 `self_contained` wording
+warns on **4.5%** of the real orders (the earlier wording warned on 63.6%), and `write_policy_stated`
+and `is_investigation` warn on **0%** of them. `single_outcome` is still asked, but its bad side is
+reported as **information, not a warning**, because 59.1% of the real orders bundle numbered items and
+trip it. The two warnings are `self_contained` and `write_policy_stated` below `0.5`; when
+`is_investigation >= 0.5` without `--read-only` the lint advises passing `--read-only`. **The code
+checks are unvalidated, so the lint is a hint, not a gate.** `start --jev-lint` runs the same lint on
+the prompt before dispatch and never blocks the start; `DSH_OFFLOAD_JEV_LINT=1` enables it by default.
+
+### Watch and `wait --jev-watch`
+
+**`jev watch <jobId> [--interval-ms N] [--timeout-ms N]` — progress triage (UNVALIDATED).** Every
+interval (default 120000 ms) it re-reads the job state; a settled job exits `0` immediately. Otherwise
+it reads the newest activity lines through `session-tail.mjs` and asks one `choice` question,
+`progress` (`progressing` / `looping` / `blocked_env` / `off_task` / `finished`). It keeps watching
+while the verdict is `progressing` or confidence is below `0.6`; a confident `looping`, `blocked_env`,
+or `off_task` prints the verdict, confidence, and the last five activity lines and exits `4`. Timeout
+(`--timeout-ms`, default 1 hour) exits `5`, and an error exits `1`. This is the command to wrap in
 Claude Code's Bash `run_in_background: true`, so the orchestrator is woken only on a problem or a
 completion:
 
@@ -614,8 +655,17 @@ node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs jev watch <jobId>
 `DSH_OFFLOAD_SESSION_TAIL` overrides the tailer `watch` runs (tests point it at a stub). Jev is a
 pre-screen for the orchestrator's review — it does not approve, and you still read the diff.
 
-**`jev triage` — failure kinds (rules first, Jev last).** Shown in the `result`/`wait` block when a job
-ended in `error`, and available as `jev triage <jobId>`. A table of code rules runs first:
+**`wait --jev-watch` — early return (UNVALIDATED).** `wait <jobId> --jev-watch
+[--watch-interval-ms N]` (default 120000; `DSH_OFFLOAD_JEV_WATCH=1` enables it) reuses the `jev watch`
+triage every interval while it waits. On a confident (`WATCH_MIN_CONFIDENCE`, 0.6) `looping`,
+`blocked_env` or `off_task` it stops waiting, prints the verdict, confidence, the last five activity
+lines and the steering commands (`dsh-offload update <jobId> "..."` / `dsh-offload cancel <jobId>`),
+and exits `4`; the job keeps running. Without a key it prints the disabled line and waits normally.
+
+### Triage
+
+**`jev triage <jobId>` — failure kinds (rules first, Jev last).** Shown in the `result`/`wait` block
+when a job ended in `error`, and available as a command. A table of code rules runs first:
 
 | pattern | kind | advice |
 | :--- | :--- | :--- |
@@ -630,17 +680,10 @@ Only when no rule matches AND Jev is enabled does it ask one `failure_kind` choi
 branch is UNVALIDATED** — no labelled failure set measured it. Triage prints kind, source and advice;
 it never auto-resumes anything.
 
-**`wait --jev-watch` — early return (UNVALIDATED).** `wait <jobId> --jev-watch
-[--watch-interval-ms N]` (default 120000; `DSH_OFFLOAD_JEV_WATCH=1` enables it) reuses the `jev watch`
-triage every interval while it waits. On a confident (`WATCH_MIN_CONFIDENCE`, 0.6) `looping`,
-`blocked_env` or `off_task` it stops waiting, prints the verdict, confidence, the last five activity
-lines and the steering commands (`dsh-offload update <jobId> "..."` / `dsh-offload cancel <jobId>`),
-and exits `4`; the job keeps running. Without a key it prints the disabled line and waits normally.
+### Planning aids
 
-### Jev planning aids and worker self-check
-
-These commands SUGGEST; none of them dispatches, approves, or changes a job. Every one stays
-disabled without a key, printing the same one `jev: disabled — set TYPESAFE_API_KEY` line.
+These commands SUGGEST; none of them dispatches, approves, or changes a job. Every one stays disabled
+without a key, printing the same one `jev: disabled — set TYPESAFE_API_KEY` line.
 
 **`jev route` — role suggestion (measured, suggestion only).** Reads a roles file
 (`[{"name": "...", "mission": "..."}]`), sends one Jev request with one `fits_role_v2` noul per role
@@ -655,48 +698,48 @@ without one the command prints how to create it and exits `0`.
 ```sh
 cat > .agents/jev-roles.json <<'JSON'
 [
-  { "name": "DevOps-SRE",        "mission": "Gateway, worker, deploys, and the internal key channel" },
-  { "name": "Pipeline-Engineer", "mission": "Native Rust core, the CGO ABI, and vision rescue" }
+  { "name": "Backend", "mission": "Services, APIs, storage" },
+  { "name": "Docs",    "mission": "README, guides, examples" }
 ]
 JSON
 node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs jev route --prompt-file task.md
 ```
 
 Measured on a known-answer evaluation, 2026-09-27: `fits_role_v2` scored **40.9% top-1 / 54.5%
-top-2** on 22 real work orders (only 3 of the 5 roster roles appeared as primary labels). That is why
-every run prints `routing measured 40.9% top-1 / 54.5% top-2 on 22 work orders — a suggestion for the
-orchestrator, not a dispatch`.
+top-2** on 22 real work orders. That is why every run prints `routing measured 40.9% top-1 / 54.5%
+top-2 on 22 work orders — a suggestion for the orchestrator, not a dispatch`.
 
-**`jev skills` — skill suggestion (UNVALIDATED).** Reads `<skills-dir>/*/SKILL.md` frontmatter
-(`name` and `description`, with folded `>-` and literal `|` blocks tolerated), then uses the
-cookbook's two-request shape: request 1 is a `choice` over every skill name plus `none`, with the
-descriptions as criteria; its top three by probability go into request 2, a `choice` over just those
-three plus `none` with each `SKILL.md`'s first 60 lines in state. The output names the pick and says
-`attach .agents/skills/<name>/SKILL.md to the work order`. Skills default to
-`<projectRoot>/.agents/skills` (`--skills-dir D` overrides); with fewer than two skills the command is
-skipped with one line. **The questions and thresholds were never measured — treat this as a hint.**
+**`jev skills` — skill suggestion (UNVALIDATED).** Reads `<skills-dir>/*/SKILL.md` frontmatter (`name`
+and `description`, with folded `>-` and literal `|` blocks tolerated), then uses the cookbook's
+two-request shape: request 1 is a `choice` over every skill name plus `none`, with the descriptions as
+criteria; its top three by probability go into request 2, a `choice` over just those three plus `none`
+with each `SKILL.md`'s first 60 lines in state. The output names the pick and says `attach
+.agents/skills/<name>/SKILL.md to the work order`. Skills default to `<projectRoot>/.agents/skills`
+(`--skills-dir D` overrides); with fewer than two skills the command is skipped with one line. **The
+questions and thresholds were never measured — treat this as a hint.**
 
 **`jev conflicts` — cross-job finding conflicts (synthetic evaluation only).** Code extracts findings
 from each named job's result text (bullet/numbered lines, and sentences that cite a path), pairs only
-findings from **different jobs** that mention the **same file path**, and caps the work at
-`PAIRS_MAX` (60). Each pair gets one `contradicts` noul (verbatim from the known-answer evaluation,
-2026-09-27) and everything at or above `0.5` is reported with both finding texts shortened to 200
-characters and both job ids. The caveat `measured on synthetic contradictions only (AUC 0.997)` prints
-every time: the evaluation built contradicting pairs by code-negating real claims, so it measures
-literal contradiction detection, not real conflicting findings. **Use it to choose where to read, not
-to decide.**
+findings from **different jobs** that mention the **same file path**, and caps the work at `PAIRS_MAX`
+(60). Each pair gets one `contradicts` noul (verbatim from the known-answer evaluation, 2026-09-27)
+and everything at or above `0.5` is reported with both finding texts shortened to 200 characters and
+both job ids. The caveat `measured on synthetic contradictions only (AUC 0.997)` prints every time:
+the evaluation built contradicting pairs by code-negating real claims, so it measures literal
+contradiction detection, not real conflicting findings. **Use it to choose where to read, not to
+decide.**
 
-**Worker self-check MCP server (`start --jev-mcp`, UNVALIDATED loop).** `.agents/mcp-jev/server.cjs`
-is a zero-dependency MCP stdio server the worker itself calls. `start --jev-mcp` merges it into the
-job's MCP config (the merged config is written beside the job record, and any `--mcp-config` servers
-are kept) and appends one sentence to the prompt: *Before your final answer, you may call
-jev_check_claims on the file:line claims you make and jev_check_scope on your diff; fix or drop what
-they flag.* The two tools:
+### Worker self-check (`start --jev-mcp`, UNVALIDATED loop)
 
-- `jev_check_claims {claims: [{claim, path, line}], repo?}` — the **server** reads the ±6
-  working-tree lines at each cited path itself and never accepts evidence text from the caller; it
-  returns each claim's support probability with a verdict at `0.3`. The underlying `claim_support`
-  question is measured (2026-09-27: AUC 0.95; at 0.3 precision 0.905, recall 0.826, accuracy 0.870).
+`.agents/mcp-jev/server.cjs` is a zero-dependency MCP stdio server the worker itself calls. `start
+--jev-mcp` merges it into the job's MCP config (the merged config is written beside the job record,
+and any `--mcp-config` servers are kept) and appends one sentence to the prompt: *Before your final
+answer, you may call jev_check_claims on the file:line claims you make and jev_check_scope on your
+diff; fix or drop what they flag.* The two tools:
+
+- `jev_check_claims {claims: [{claim, path, line}], repo?}` — the **server** reads the ±6 working-tree
+  lines at each cited path itself and never accepts evidence text from the caller; it returns each
+  claim's support probability with a verdict at `0.3`. The underlying `claim_support` question is
+  measured (2026-09-27: AUC 0.950; at 0.3 precision 0.905, recall 0.826).
 - `jev_check_scope {work_order, repo?, base?}` — reuses `jev review` (no duplicated detectors) over
   `base..HEAD` plus untracked files and returns the flagged groups and look-here hunks. Pass the base
   commit; `base` defaults to `HEAD`, which then reviews untracked files only.
@@ -704,7 +747,19 @@ they flag.* The two tools:
 `repo` defaults to the server's working directory. **The self-check loop as a whole is UNVALIDATED**
 (the questions it reuses are measured). With no key both tools return a clear `Jev disabled` text
 result, never an error, so a worker keeps going. The installer links `.agents/mcp-jev/server.cjs` the
-same way it links `.agents/mcp-deepseek/server.cjs`.
+same way it links `.agents/mcp-deepseek/server.cjs`. Full server contract:
+[`.agents/mcp-jev/README.md`](../../mcp-jev/README.md).
+
+### Exit codes
+
+| Command | Codes |
+| :--- | :--- |
+| `jev review` | `0` clean, `3` flagged, `1` error |
+| `jev lint` | `0` advisory, `1` missing prompt file or API failure |
+| `jev watch` | `0` settled/finished, `4` looping/blocked/off-task, `5` timeout, `1` error |
+| `wait --jev-watch` | `0` normal settle, `4` watched problem (the job keeps running) |
+| `result` / `wait` | unchanged, plus `3` when `--jev-exit` is passed and the review flagged |
+| `jev claims` / `decide` / `log` / `triage` / `route` / `skills` / `conflicts` | `0`, or `1` on a read/API error |
 
 ---
 
@@ -739,4 +794,6 @@ same way it links `.agents/mcp-deepseek/server.cjs`.
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.
 - [../../mcp-deepseek/git-guard.cjs](../../mcp-deepseek/git-guard.cjs) — the git write guard the bridge installs before spawning a job.
 - [../../mcp-deepseek/README.md](../../mcp-deepseek/README.md) — bridge setup and env vars.
+- [scripts/jev/](scripts/jev/) — the optional Jev modules, one per concern. [scripts/jev/questions.mjs](scripts/jev/questions.mjs) is the one source of the measured question wordings; [scripts/jev/rules.mjs](scripts/jev/rules.mjs) holds the code hard rules.
 - [../../mcp-jev/server.cjs](../../mcp-jev/server.cjs) — the worker self-check MCP server `start --jev-mcp` mounts.
+- [../../mcp-jev/README.md](../../mcp-jev/README.md) — the self-check server's tools, schemas, and evidence rule.
