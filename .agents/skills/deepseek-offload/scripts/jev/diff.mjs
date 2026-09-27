@@ -16,11 +16,11 @@ export const MAX_HUNK_CHARS = 4000
 export const TRUNCATION_MARKER = '\n...[TRUNCATED]'
 
 /**
- * Split a group larger than this into several choice requests. The evaluation
- * capped each group at 7 hunks (6 own + 1 smuggled), so groups above 7 hunks
- * were not measured; keep this conservative.
+ * Split a group larger than this into several choice requests. This is the
+ * measured group size: the evaluation capped each group at 7 hunks
+ * (6 own + 1 smuggled); larger groups were not measured.
  */
-export const MAX_HUNKS_PER_REQUEST = 12
+export const MAX_HUNKS_PER_REQUEST = 7
 
 /** Generated dependency files never carry a meaningful scope judgment. */
 export const LOCKFILES = new Set(['package-lock.json', 'Cargo.lock', 'go.sum', 'yarn.lock', 'pnpm-lock.yaml'])

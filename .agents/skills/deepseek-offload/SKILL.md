@@ -457,7 +457,7 @@ files in a shared working tree get reviewed too. It runs two detectors from a kn
 evaluation on 33 real worker commits:
 
 - **Detector B (whole group):** one `choice` question, `odd_hunk`, with one option per hunk
-  (`h0..hN`) plus `none`. Flag when `P(none) < 0.6`.
+  (`h0..hN`) plus `none`. Flag when `P(none) < 0.5`.
 - **Detector A (per hunk):** the `in_scope` and `unrequested` nouls. The look-here list is the two
   lowest-`in_scope` hunks of each flagged group, plus any hunk with `changed_lines >= 5` and
   `in_scope < 0.3` anywhere. Report whole-job drift when the mean `in_scope` over all hunks is
@@ -467,10 +467,10 @@ Measured on that set (same-area smuggled hunks, thresholds chosen on the same da
 numbers as a guide, not a guarantee): the whole-commit `odd_hunk` caught the smuggled hunk 32/33 at
 `P(none) < 0.5` with 1/33 clean false alarms (that one at `P(none)=0.49`); the per-hunk `in_scope`
 put the smuggled hunk among the two lowest 33/33. Each measured group was capped at 7 hunks (6 own
-+ 1 smuggled); the shipped cap is 12, so a review of a group above 7 hunks is outside the measured
-range. The shipped threshold is `0.6` — a deliberate margin above the measured `0.5`, so it will
-flag slightly more clean diffs. Commit-mean `in_scope` catches whole-job drift but not a single
-smuggled hunk, which is why B and A are separate.
++ 1 smuggled), and the shipped cap is the same 7, so a larger group is split into measured-size
+requests. The shipped threshold is the measured `0.5`: a `0.6` margin was dropped after a live check
+flagged 2 of 5 legitimate real commits with it. Commit-mean `in_scope` catches whole-job drift but
+not a single smuggled hunk, which is why B and A are separate.
 
 ```sh
 node "$OFF" jev review <jobId> --repo "$PWD" --base <old-sha> [--head <new-sha>] [--json]
