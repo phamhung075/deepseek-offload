@@ -153,6 +153,17 @@ Prompts must be self-contained: a job gets a fresh session that cannot see your 
 cannot ask you questions. A prompt of `-` reads the task from stdin; `--prompt-file FILE` (`-f FILE`)
 reads it from a file, which avoids shell backtick expansion.
 
+## Optional TypeSafe Jev pre-screen
+
+With a `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`) in the environment, three optional `jev`
+subcommands add judgments around a delegation: `jev review` pre-screens a job's diff against its
+work order and exits `3` when it wants a closer look, `jev lint` gives an advisory work-order
+check (`start --jev-lint` runs it automatically), and `jev watch` triages a running job's progress
+and exits `4` on a problem. Without a key every jev feature is skipped with one line, and no other
+command changes behaviour. Jev never approves anything — it is a pre-screen, and the orchestrator
+still reviews every diff. Full contract, measured numbers, and exit codes:
+[SKILL.md § Jev judgments (optional)](.agents/skills/deepseek-offload/SKILL.md#jev-judgments-optional).
+
 ## Why jobs land under a project folder (and used to land in "Ungrouped")
 
 The GUI groups sessions by **Workspace**, which is a durable account owned by the GUI process: the

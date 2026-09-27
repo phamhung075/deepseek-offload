@@ -316,6 +316,24 @@ node "$R" mcp-servers --mcp-config "$PWD/.mcp.json"     # dry run: what would be
 node "$R" start "<task>" --mcp-config "$PWD/.mcp.json" --label <name>
 ```
 
+### Optional — TypeSafe Jev judgments
+
+Jev is off unless a key is exported in the shell that runs the runner. It adds an optional diff
+pre-screen (`jev review`), work-order lint (`jev lint`, and `start --jev-lint`), and progress
+triage (`jev watch`). Set the key once in the environment — never in a job prompt or a config file:
+
+```sh
+export TYPESAFE_API_KEY=<key>        # or the workspace TYPESAFE_AI_API
+# export TYPESAFE_API_URL=https://api.typesafe.ai/v1/systemone   # override for a stub/proxy
+# export DSH_OFFLOAD_JEV_LINT=1      # run the lint on every start by default
+```
+
+With no key every jev command prints one line (`jev: disabled — set TYPESAFE_API_KEY`) and exits 0,
+and no other command changes. The key is never printed, logged, or persisted. Jev is a pre-screen,
+not an approval: the orchestrator still reviews every diff. Details and exit codes are in
+[`.agents/skills/deepseek-offload/SKILL.md`](.agents/skills/deepseek-offload/SKILL.md) under "Jev
+judgments (optional)".
+
 ## Failure playbook
 
 Diagnose with a command before proposing a fix. Each row names the command that decides it.

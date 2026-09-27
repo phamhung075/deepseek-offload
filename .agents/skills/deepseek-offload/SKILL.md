@@ -12,7 +12,9 @@ description: >-
   how to follow a running job (the web GUI lists its session but cannot show it
   live), prompt contracts for self-contained jobs, the git write guard that refuses
   commits and pushes by default, the `--read-only` file policy for investigation jobs,
-  and the security and token rules.
+  the optional TypeSafe Jev pre-screen (`jev review`, `jev lint`, `jev watch`) that
+  flags a diff to look at before the orchestrator reviews it, and the security and
+  token rules.
 ---
 
 # DeepSeek Background Offload — delegating work from other LLMs
@@ -279,11 +281,15 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `list` | Recent jobs, newest first; `--all` for every job. | `0` |
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
+| `jev review` | Optional TypeSafe Jev pre-screen of a job's diff against its work order — see "Jev judgments (optional)". | `0` clean, `3` flagged, `1` error |
+| `jev lint` | Optional, **UNVALIDATED** brief check of a work order. Advisory only. | `0` always, `1` error |
+| `jev watch` | Optional, **UNVALIDATED** progress triage for a running job. | `0` settled/finished, `4` looping/blocked/off-task, `5` timeout, `1` error |
 
 Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-config FILE`,
 `--prompt-file FILE` / `-f FILE` (for `start`), `--label NAME`, `--permission allow|reject`,
 `--allow-git-write`, `--read-only`, `--timeout-ms N`,
-`--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
+`--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`),
+`--jev-lint` (run the optional, UNVALIDATED Jev lint before a `start`).
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
 shows for it: an idle row under the project folder, never live progress. Jobs are detached: they keep running after the launching session ends.
@@ -422,6 +428,86 @@ original session in the GUI.
   from a delegated job.
 - **Budget.** Default child timeout is 15 minutes. One job = one DSH session = visible to the
   user — don't spam a job per trivial question.
+
+---
+
+## Jev judgments (optional)
+
+[TypeSafe System One (Jev)](https://docs.typesafe.ai/) turns a semantic question into a
+probability code can branch on. Three subcommands add judgments around a delegation. **Jev is a
+pre-screen; the orchestrator still reviews every diff.** Jev never approves anything, and nothing
+here replaces the review rule above.
+
+**Key setup.** Jev is optional. It enables when `TYPESAFE_API_KEY` (or the workspace
+`TYPESAFE_AI_API`) is set; with no key every jev feature is skipped with one line — `jev: disabled
+— set TYPESAFE_API_KEY` — and no other command changes behaviour. The key is read from the
+environment on each call, never printed, logged, or written to a report. `TYPESAFE_API_URL`
+overrides the endpoint (tests use a local stub).
+
+```sh
+export TYPESAFE_API_KEY=<key>          # or TYPESAFE_AI_API
+OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
+```
+
+**`jev review` — diff scope pre-screen (measured).** Reviews a job's diff against its work order
+(grouped one request per commit plus one for untracked files), and writes
+`<jobId>.jev-review.json` beside the job record. The untracked group includes **every** untracked,
+non-ignored file in the repository, so run review in the job's own clean clone or worktree — stray
+files in a shared working tree get reviewed too. It runs two detectors from a known-answer
+evaluation on 33 real worker commits:
+
+- **Detector B (whole group):** one `choice` question, `odd_hunk`, with one option per hunk
+  (`h0..hN`) plus `none`. Flag when `P(none) < 0.6`.
+- **Detector A (per hunk):** the `in_scope` and `unrequested` nouls. The look-here list is the two
+  lowest-`in_scope` hunks of each flagged group, plus any hunk with `changed_lines >= 5` and
+  `in_scope < 0.3` anywhere. Report whole-job drift when the mean `in_scope` over all hunks is
+  below `0.5`.
+
+Measured on that set (same-area smuggled hunks, thresholds chosen on the same data — treat the
+numbers as a guide, not a guarantee): the whole-commit `odd_hunk` caught the smuggled hunk 32/33 at
+`P(none) < 0.5` with 1/33 clean false alarms (that one at `P(none)=0.49`); the per-hunk `in_scope`
+put the smuggled hunk among the two lowest 33/33. Each measured group was capped at 7 hunks (6 own
++ 1 smuggled); the shipped cap is 12, so a review of a group above 7 hunks is outside the measured
+range. The shipped threshold is `0.6` — a deliberate margin above the measured `0.5`, so it will
+flag slightly more clean diffs. Commit-mean `in_scope` catches whole-job drift but not a single
+smuggled hunk, which is why B and A are separate.
+
+```sh
+node "$OFF" jev review <jobId> --repo "$PWD" --base <old-sha> [--head <new-sha>] [--json]
+node "$OFF" jev review --prompt-file task.md --repo "$PWD" --base <old-sha>
+# exit 0 = clean, 3 = flagged (branch on this), 1 = error
+```
+
+For a resumed job, `review` follows `resumeOf` back to the original job's prompt. Use its
+`look here` list (or `report.lookHere` in `--json`) as the starting point for your own review — it
+ranks where to look; it does not decide.
+
+**`jev lint` — work-order pre-check (UNVALIDATED).** Deterministic checks first (word budget, a
+named path, an output-format/word-budget phrase), then one Jev request with four nouls:
+`single_outcome`, `self_contained`, `write_policy_stated`, and `is_investigation`. It warns for any
+noul on the bad side of `0.5`, and when `is_investigation >= 0.5` without `--read-only` it advises
+passing `--read-only`. **No labelled set measured these questions, so the lint is a hint, not a
+gate.** It always exits `0` (advisory) except on a read error. `start --jev-lint` runs the same
+lint on the prompt before dispatch and never blocks the start; `DSH_OFFLOAD_JEV_LINT=1` enables it
+by default.
+
+**`jev watch` — progress triage (UNVALIDATED).** Every interval (default 120000 ms, `--interval-ms`)
+it re-reads the job state; a settled job exits `0` immediately. Otherwise it reads the newest
+activity lines through `session-tail.mjs` and asks one `choice` question, `progress`
+(`progressing` / `looping` / `blocked_env` / `off_task` / `finished`). It keeps watching while the
+verdict is `progressing` or confidence is below `0.6`; a confident `looping`, `blocked_env`, or
+`off_task` prints the verdict, confidence, and the last five activity lines and exits `4`. Timeout
+(`--timeout-ms`, default 1 hour) exits `5`. **Also unvalidated.** This is the command to wrap in
+Claude Code's Bash `run_in_background: true`, so the orchestrator is woken only on a problem or a
+completion:
+
+```sh
+# from Claude Code's Bash tool, with run_in_background: true
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs jev watch <jobId>
+```
+
+`DSH_OFFLOAD_SESSION_TAIL` overrides the tailer `watch` runs (tests point it at a stub). Jev is a
+pre-screen for the orchestrator's review — it does not approve, and you still read the diff.
 
 ---
 
