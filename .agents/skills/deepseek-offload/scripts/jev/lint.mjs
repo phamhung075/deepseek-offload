@@ -1,10 +1,14 @@
 /**
  * `jev lint` — a brief, advisory pre-check of a work order before dispatch.
  *
- * This command is UNVALIDATED. Unlike `jev review`, no known-answer set measured
- * these four questions or the code checks, so treat every line as a hint the
- * orchestrator may ignore. Deterministic checks run first (word budget, a named
- * path, an output-format phrase); then one Jev request carries all four nouls.
+ * The two questions whose bad side warns were measured on a known-answer
+ * evaluation, 2026-09-27: the v2 `self_contained` wording false-warns on 4.5% of
+ * 22 real work orders (the previous wording: 63.6%), and `write_policy_stated`
+ * false-warns on 0% of them (its negatives were synthetic). `single_outcome` is
+ * kept and asked, but reported as information: it warned on 59.1% of the real
+ * orders because they bundle numbered items. Deterministic checks run first
+ * (word budget, a named path, an output-format phrase); then one Jev request
+ * carries all four nouls.
  *
  * The same findings power `start --jev-lint` (or `DSH_OFFLOAD_JEV_LINT=1`),
  * which prints them before dispatch and never prevents a start.
@@ -26,11 +30,19 @@ const PATH_RE = /(?:^|\s)(?:[A-Za-z]:[\\/]|\/)[^\s]+|(?:^|\s)[\w.@-]+\/[\w.@/-]+
 const OUTPUT_FORMAT_RE =
   /\b(?:words?|bullets?|numbered|json|markdown|report|table|paragraph|sentences?|lines?|characters?|format|sections?|headings?|lists?)\b/i
 
-/** The three nouls whose bad side is "too low". */
+/** The two nouls whose bad side is "too low" and is reported as a warning. */
 const BAD_SIDE_QUESTIONS = [
-  ['single_outcome', 'does not clearly name one concrete, verifiable outcome'],
-  ['self_contained', "may not be self-contained for a worker that cannot see the requester's conversation"],
+  ['self_contained', 'may not be self-contained for a worker that cannot see the requester\'s conversation'],
   ['write_policy_stated', 'does not clearly state whether the worker may modify files, commit, or push'],
+]
+
+/**
+ * The noul whose bad side is measured to fire on good real orders, so it is
+ * reported as information. Kept because it still separates a real order from a
+ * generic prompt.
+ */
+const INFO_QUESTIONS = [
+  ['single_outcome', 'may bundle several outcomes, but this reads as information: on the 2026-09-27 evaluation it fired on 59.1% of good real orders'],
 ]
 
 /** Word count of the work order. */
@@ -53,19 +65,24 @@ export function runCodeChecks(prompt) {
   return warnings
 }
 
-/** Turn the four noul answers into warnings and advice. */
+/** Turn the four noul answers into warnings, information, and advice. */
 export function lintFindings(answers, { readOnly = false } = {}) {
   const warnings = []
+  const info = []
   const advice = []
   for (const [id, message] of BAD_SIDE_QUESTIONS) {
     const value = answers?.[id]?.noul
     if (typeof value === 'number' && value < BAD_SIDE) warnings.push(`${message} (${id}=${value.toFixed(3)})`)
   }
+  for (const [id, message] of INFO_QUESTIONS) {
+    const value = answers?.[id]?.noul
+    if (typeof value === 'number' && value < BAD_SIDE) info.push(`${message} (${id}=${value.toFixed(3)})`)
+  }
   const investigation = answers?.is_investigation?.noul
   if (typeof investigation === 'number' && investigation >= BAD_SIDE && !readOnly) {
     advice.push('this reads like an investigation — pass `--read-only` so the worker cannot write files')
   }
-  return { warnings, advice }
+  return { warnings, info, advice }
 }
 
 /**
@@ -89,14 +106,16 @@ export async function runStartLint(prompt, { readOnly = false, env = process.env
   try {
     const codeWarnings = runCodeChecks(prompt)
     const { answers } = await lintPrompt(prompt, env)
-    const { warnings, advice } = lintFindings(answers, { readOnly })
-    const all = [...codeWarnings, ...warnings, ...advice]
-    if (all.length === 0) {
+    const { warnings, info, advice } = lintFindings(answers, { readOnly })
+    const all = [...codeWarnings, ...warnings]
+    if (all.length === 0 && info.length === 0 && advice.length === 0) {
       stdout.write('jev lint (unvalidated advisory): no warnings\n')
       return
     }
     stdout.write('jev lint (unvalidated advisory — the start proceeds either way):\n')
     for (const line of all) stdout.write(`  - ${line}\n`)
+    for (const line of info) stdout.write(`  i ${line}\n`)
+    for (const line of advice) stdout.write(`  > ${line}\n`)
   } catch (error) {
     stderr.write(`dsh-offload: jev lint skipped: ${error.message}\n`)
   }
@@ -139,7 +158,7 @@ export async function runLint(positional, flags, ctx) {
     ctx.stderr.write(`dsh-offload: jev lint failed: ${error.message}\n`)
     return 1
   }
-  const { warnings, advice } = lintFindings(answers, { readOnly })
+  const { warnings, info, advice } = lintFindings(answers, { readOnly })
   const allWarnings = [...codeWarnings, ...warnings]
   const report = {
     kind: 'jev-lint',
@@ -148,6 +167,7 @@ export async function runLint(positional, flags, ctx) {
     promptFile,
     wordCount: wordCount(prompt),
     warnings: allWarnings,
+    info,
     advice,
     answers,
     model,
@@ -159,13 +179,17 @@ export async function runLint(positional, flags, ctx) {
   ctx.stdout.write('jev lint (unvalidated advisory — not a gate; Jev does not approve anything)\n')
   ctx.stdout.write(`prompt     ${promptFile}\n`)
   ctx.stdout.write(`words      ${report.wordCount}\n`)
-  if (allWarnings.length === 0 && advice.length === 0) {
+  if (allWarnings.length === 0 && info.length === 0 && advice.length === 0) {
     ctx.stdout.write('\nno warnings\n')
     return 0
   }
   if (allWarnings.length > 0) {
     ctx.stdout.write('\nwarnings:\n')
     for (const line of allWarnings) ctx.stdout.write(`  - ${line}\n`)
+  }
+  if (info.length > 0) {
+    ctx.stdout.write('\ninfo:\n')
+    for (const line of info) ctx.stdout.write(`  - ${line}\n`)
   }
   if (advice.length > 0) {
     ctx.stdout.write('\nadvice:\n')

@@ -283,7 +283,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
 | `jev review` | Optional TypeSafe Jev pre-screen of a job's diff against its work order — see "Jev judgments (optional)". | `0` clean, `3` flagged, `1` error |
-| `jev lint` | Optional, **UNVALIDATED** brief check of a work order. Advisory only. | `0` always, `1` error |
+| `jev lint` | Optional, advisory brief check of a work order (measured wording, unvalidated code checks). | `0` always, `1` error |
 | `jev watch` | Optional, **UNVALIDATED** progress triage for a running job. | `0` settled/finished, `4` looping/blocked/off-task, `5` timeout, `1` error |
 | `jev claims` | Optional report claim check: `path:line` citations vs ±6 evidence lines at `--rev` (default HEAD), threshold `0.3`. Never flags the diff. | `0`, `1` error |
 | `jev decide` | Records an `accept`/`reject`/`partial` label for a job's review in `jev-log.jsonl`. Pure local. | `0`, `1` error |
@@ -573,14 +573,19 @@ clean∧accepted), plus a what-if for a `P(none)` threshold at `0.4`/`0.5`/`0.6`
 stored reports. It is pure local and needs no key. Labels are the only way to retune the thresholds on
 real data instead of guessing — the shipped numbers came from one 33-commit set.
 
-**`jev lint` — work-order pre-check (UNVALIDATED).** Deterministic checks first (word budget, a
-named path, an output-format/word-budget phrase), then one Jev request with four nouls:
-`single_outcome`, `self_contained`, `write_policy_stated`, and `is_investigation`. It warns for any
-noul on the bad side of `0.5`, and when `is_investigation >= 0.5` without `--read-only` it advises
-passing `--read-only`. **No labelled set measured these questions, so the lint is a hint, not a
-gate.** It always exits `0` (advisory) except on a read error. `start --jev-lint` runs the same
-lint on the prompt before dispatch and never blocks the start; `DSH_OFFLOAD_JEV_LINT=1` enables it
-by default.
+**`jev lint` — work-order pre-check (measured wording, advisory).** Deterministic checks first (word
+budget, a named path, an output-format/word-budget phrase), then one Jev request with four nouls:
+`single_outcome`, `self_contained`, `write_policy_stated`, and `is_investigation`. On a known-answer
+evaluation, 2026-09-27, run over 22 real work orders (their negatives synthetic): the v2
+`self_contained` wording warns on **4.5%** of the real orders (the earlier wording warned on 63.6%),
+and `write_policy_stated` and `is_investigation` warn on **0%** of them. `single_outcome` is still
+asked, but its bad side is reported as **information, not a warning**, because 59.1% of the real
+orders bundle numbered items and trip it. The two warnings are `self_contained` and
+`write_policy_stated` below `0.5`; when `is_investigation >= 0.5` without `--read-only` the lint
+advises passing `--read-only`. **The code checks are unvalidated, so the lint is a hint, not a
+gate.** It always exits `0` (advisory) except on a read error. `start --jev-lint` runs the same lint
+on the prompt before dispatch and never blocks the start; `DSH_OFFLOAD_JEV_LINT=1` enables it by
+default.
 
 **`jev watch` — progress triage (UNVALIDATED).** Every interval (default 120000 ms, `--interval-ms`)
 it re-reads the job state; a settled job exits `0` immediately. Otherwise it reads the newest

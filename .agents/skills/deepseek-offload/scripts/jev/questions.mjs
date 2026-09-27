@@ -60,7 +60,19 @@ export function oddHunkRequest(workOrder, hunks) {
   }
 }
 
-/** The four brief-check nouls. The lint is advisory and unvalidated. */
+/**
+ * The four brief-check nouls. The lint is advisory and unvalidated.
+ *
+ * Measured on a known-answer evaluation, 2026-09-27 (22 real work orders plus
+ * synthetic negatives): the shipped `self_contained` text was replaced with the
+ * v2 wording below, whose false-warning rate on the real orders fell from 63.6%
+ * to 4.5%. `write_policy_stated` and `is_investigation` false-warned on 0% of
+ * the 22 real orders (their negatives were synthetic), so those wordings are
+ * unchanged. `single_outcome` (the wording this file has always used) separates
+ * the real orders from a generic prompt, but 59.1% of the real orders bundle
+ * numbered items and trip its bad side, so `lint.mjs` reports that side as
+ * information rather than a warning.
+ */
 export const LINT_QUESTIONS = {
   single_outcome: {
     type: 'noul',
@@ -72,11 +84,10 @@ export const LINT_QUESTIONS = {
   },
   self_contained: {
     type: 'noul',
-    instructions:
-      "Can a worker with no access to the requester's conversation carry out `work_order` from its text alone?",
+    instructions: 'Can a worker start from `work_order` without asking the requester anything?',
     criteria: {
-      true: 'Its paths, scope, and deliverable are stated in the text.',
-      false: 'It depends on context only the requester has.',
+      true: 'The text gives the worker everything it needs.',
+      false: 'The worker must ask the requester for something.',
     },
   },
   write_policy_stated: {

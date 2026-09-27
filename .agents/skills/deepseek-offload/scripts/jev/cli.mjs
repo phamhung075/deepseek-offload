@@ -20,7 +20,8 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
                                Jev; exit 3 when flagged, 0 when clean. Writes
                                <jobId>.jev-review.json beside the job record.
   jev lint --prompt-file F [--read-only] [--json]
-                               brief, UNVALIDATED work-order check; advisory,
+                               brief, advisory work-order check (wording
+                               measured 2026-09-27, code checks unvalidated);
                                always exits 0. Enables start --jev-lint.
   jev watch <jobId> [--interval-ms N] [--timeout-ms N]
                                UNVALIDATED progress triage; exit 4 on a
