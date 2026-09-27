@@ -27,6 +27,15 @@ Assistant text on a Harness that publishes it, and its activity lines otherwise.
 - **`DSH_HOME`** — the Harness data directory holding sessions and profiles (default `~/.dsh`); the
   bridge and the web GUI must share it.
 - **Workspace** — the web GUI's grouping of sessions by the project folder they ran in.
+- **Jev** — [TypeSafe System One](https://docs.typesafe.ai/), the optional service that turns a
+  narrow semantic question into a calibrated probability code can branch on. It needs
+  `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`).
+- **Pre-screen** — a Jev output that ranks where the orchestrator should look next; it never
+  approves, blocks, dispatches, or resumes anything.
+- **Review block** — the compact `--- jev review ...` text `result`/`wait` append after an
+  auto-review, and the `jevReview` field of their `--json` output.
+- **Hard rules** — the deterministic checks (`neverTouch`, `pathScope`, `ignorePaths` from
+  `.agents/jev.json`) evaluated in code before any Jev call, because Jev can be steered by its state.
 
 ## How a job flows
 
@@ -41,6 +50,12 @@ Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ d
 The top row is the delegation path; the lower branch is how the finished session gets filed under
 your project's Workspace instead of "Ungrouped".
 
+With Jev configured, the same flow gains four optional checkpoints that never change a job's own
+state or exit code: a work-order lint before dispatch (`start --jev-lint`), a progress watch while it
+runs (`jev watch`, or `wait --jev-watch`), an automatic review of the clone's diff when it settles
+(`start --review-repo`), and a decision you record afterwards (`jev decide`). The review is a
+look-here list, not an approval.
+
 ## What is in here
 
 You do not need to read every piece; this table maps each path to the role it plays.
@@ -49,10 +64,28 @@ You do not need to read every piece; this table maps each path to the role it pl
 | --- | --- |
 | [`.agents/mcp-deepseek/`](.agents/mcp-deepseek/README.md) | The MCP bridge: a zero-dependency stdio server (`server.cjs`) that speaks MCP to the calling client and ACP to a spawned `dsh --profile acp`. Can forward the caller's own MCP servers into the child session. Its git write guard (`git-guard.cjs`) refuses the job's commits and pushes. |
 | [`.agents/skills/deepseek-offload/`](.agents/skills/deepseek-offload/SKILL.md) | The skill doc for the calling agent: when to offload, the blocking MCP path vs. fire-and-forget background jobs, prompt contracts, safety rules, troubleshooting. |
+| [`.agents/mcp-jev/`](.agents/mcp-jev/README.md) | The optional worker self-check MCP server (`server.cjs`) that `start --jev-mcp` mounts, so a worker can check its own claims and diff before it answers. |
+| [`.agents/skills/deepseek-offload/scripts/jev/`](.agents/skills/deepseek-offload/scripts/jev/) | The optional TypeSafe Jev modules, one per concern: the HTTP client (`client.mjs`), the measured question wordings (`questions.mjs`), code hard rules (`rules.mjs`), git hunks (`diff.mjs`), and the `review`, `lint`, `claims`, `watch`, `triage`, `route`, `skills`, `conflicts`, `decide`, and `auto` commands. |
 | [`.agents/dsh-workspace-attach/`](.agents/dsh-workspace-attach/README.md) | DSH web-profile plugin that files delegated sessions under the project folder they ran in. |
-| [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, optional vision subagent, then `doctor`. `--update` fast-forwards the package and replaces stale project entries ([Updating an existing project](INSTALL.md#updating-an-existing-project)). `--dry-run`, `--uninstall`, `--json`. |
+| [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, the bridge/guard/plugin/skill links (including `scripts/jev` and `.agents/mcp-jev/server.cjs`), optional vision subagent, then `doctor`. `--update` fast-forwards the package and replaces stale project entries ([Updating an existing project](INSTALL.md#updating-an-existing-project)). `--dry-run`, `--uninstall`, `--json`. |
 | [`INSTALL.md`](INSTALL.md) | The install procedure written for an AI agent to execute for a human: recon, install, verify, smoke test, failure playbook, report template. |
 | [`harness/`](harness/README.md) | The Harness-side changes that make all of this work, as reviewable files and a patch. |
+
+The `scripts/jev/` modules, one line each:
+
+- `client.mjs` — the TypeSafe HTTP client: key/endpoint resolution, retries, the request pool, and the `jev: disabled` line.
+- `questions.mjs` — the one source of the measured question wordings (`in_scope`/`unrequested`/`odd_hunk`, the lint nouls, `supported`, `failure_kind`, role/skill/conflict, `progress`).
+- `rules.mjs` — the code hard rules and the `.agents/jev.json` loader.
+- `diff.mjs` — git hunk collection, commit/untracked grouping, and the 7-hunk request cap.
+- `review.mjs` — `jev review` and the report the auto-review stores.
+- `lint.mjs` — `jev lint` and the `start --jev-lint` hook.
+- `claims.mjs` — `jev claims` and the shared ±6-line evidence reader.
+- `watch.mjs` — `jev watch` and the `wait --jev-watch` probe.
+- `triage.mjs` — `jev triage`'s code rules and Jev fallback.
+- `route.mjs` / `skills.mjs` / `conflicts.mjs` — the three planning aids.
+- `decide.mjs` — `jev decide` / `jev log`.
+- `auto.mjs` — the auto-review lifecycle and the `result`/`wait` block.
+- `prompt-file.mjs` / `paths.mjs` / `job-result.mjs` — shared readers for prompt files, source paths, and stored job results.
 
 ## Requirements
 
@@ -155,22 +188,82 @@ reads it from a file, which avoids shell backtick expansion.
 
 ## Optional TypeSafe Jev pre-screen
 
-With a `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`) in the environment, the optional `jev`
-subcommands add judgments around a delegation: `jev review` first applies code-enforced hard rules
-(`neverTouch` / `pathScope` / `ignorePaths` from `.agents/jev.json`) and then pre-screens a job's diff
-against its work order, exiting `3` when it wants a closer look; `jev claims` checks the report's
-`path:line` claims against ±6 evidence lines; `jev lint` gives an advisory work-order check
-(`start --jev-lint` runs it automatically); `jev watch` triages a running job's progress and exits
-`4` on a problem, and `wait --jev-watch` reuses it for an early return; `jev decide`/`jev log` record
-accept/reject/partial labels so the thresholds can be measured on real data. Three more commands only
-suggest: `jev route` ranks the roster roles that fit a work order, `jev skills` ranks project skills,
-and `jev conflicts` flags cross-job findings that share a path; `start --jev-mcp` mounts
-`.agents/mcp-jev/server.cjs` so the worker can check its own claims and diff. `start --review-repo <the
-clone the job changes>` runs that same review automatically when the job settles, so `result` and
-`wait` arrive with the look-here block already attached. `jev triage` reports the failure kind for an
-errored job. Without a key every jev feature is skipped with one line, and no other command changes
-behaviour. Jev never approves anything — it is a pre-screen, and the orchestrator still reviews every
-diff. Full contract, measured numbers, and exit codes:
+[Jev](https://docs.typesafe.ai/) (TypeSafe System One) turns a narrow semantic question into a
+calibrated probability code can branch on. In this package it is **optional** and **advisory**.
+Export `TYPESAFE_API_KEY` (or the workspace `TYPESAFE_AI_API`) and the `jev` subcommands add typed
+judgments around a delegation; without a key every jev command that calls the API prints one line —
+`jev: disabled — set TYPESAFE_API_KEY` — and exits `0` (the pure-local `jev decide`/`jev log` need no
+key at all), and nothing else changes.
+
+**What Jev is, and is not.** It answers typed questions ("does this hunk serve the work order?",
+"is this claim supported by these lines?") as probabilities. It is a *pre-screen*: it ranks where to
+look. It never approves, blocks, dispatches, or resumes anything — the orchestrator still reviews
+every diff. The rules that must never depend on a model (`neverTouch`, `pathScope`, `ignorePaths`)
+are code, evaluated before any Jev call, because [Jev 1.13 can be steered by the content of its
+state](https://docs.typesafe.ai/model-jaggedness/jev-1.13.md). Measurements below are from a
+known-answer evaluation, 2026-09-27; everything else is marked UNVALIDATED.
+
+| Stage | Command | What it answers | Evidence status |
+| :--- | :--- | :--- | :--- |
+| Diff review | `jev review <jobId> --repo DIR --base REV` | Does a hunk or commit fall outside the work order? | measured: smuggled hunk caught 32/33, 1/33 clean false alarms; per-hunk `in_scope` AUC 0.968–0.973 |
+| Auto-review on settle | `start --review-repo DIR` | The same review, run by the worker when the job settles | as `jev review` |
+| Report claims | `jev claims <jobId> --repo DIR` | Do the cited lines support the sentence? | measured: AUC 0.950 on 46+46 claims; 0.3 → precision 0.905 / recall 0.826 |
+| Work-order lint | `jev lint --prompt-file F`, `start --jev-lint` | Is the brief self-contained, one outcome, write policy stated? | wording measured on 22 real work orders (0–4.5% false warnings); code checks UNVALIDATED |
+| Progress watch | `jev watch <jobId>`, `wait --jev-watch` | Is the run looping, blocked, or off-task? | UNVALIDATED |
+| Failure triage | `jev triage <jobId>` | Code rules first; a Jev failure kind only when no rule matches | code rules deterministic; Jev branch UNVALIDATED |
+| Role routing | `jev route --prompt-file F` | Which role fits, background vs blocking, off-peak? | measured 40.9% top-1 / 54.5% top-2 on 22 orders; `can_defer`/`needs_background` UNVALIDATED |
+| Skill suggestion | `jev skills --prompt-file F` | Which project skill to attach? | UNVALIDATED |
+| Cross-job conflicts | `jev conflicts <jobId> <jobId> ...` | Do findings from different jobs contradict each other? | measured on synthetic contradictions only, AUC 0.997 |
+| Decision log | `jev decide <jobId> ...`, `jev log` | Accept/reject/partial labels and flagged/clean agreement | local; no key needed |
+
+**Quick start** (five steps):
+
+```sh
+export TYPESAFE_API_KEY=<key>                                    # or TYPESAFE_AI_API
+OFF=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
+node "$OFF" start "<task>" --review-repo "$PWD" --label my-job   # auto-review at settle
+node "$OFF" wait <jobId>                                         # result + `--- jev review ...` block
+node "$OFF" jev decide <jobId> accept --note "looked right"      # tune thresholds over time
+```
+
+Point `--review-repo` at the clone the job changes: the review diffs it from `--review-base` (default
+HEAD at start time) to HEAD and includes its untracked files.
+
+**Exit codes.**
+
+- `jev review`: `0` clean, `3` flagged, `1` error.
+- `jev lint`: `0` advisory, `1` on a missing prompt file or an outright API failure.
+- `jev watch`: `0` settled or a confident `finished`, `4` confident looping/blocked/off-task, `5`
+  timeout, `1` error (UNVALIDATED).
+- `wait --jev-watch`: `0` normal settle, `4` a watched problem (the job keeps running).
+- `result` / `wait`: unchanged, except `--jev-exit` exits `3` when the auto-review flagged;
+  `--no-jev-review` suppresses the block.
+
+**Config files.** Both are optional.
+
+`.agents/jev.json` — code hard rules (`DSH_OFFLOAD_JEV_CONFIG` overrides the path):
+
+```json
+{
+  "neverTouch": ["secrets/**", "*.pem"],
+  "pathScope": "warn",
+  "ignorePaths": ["generated/**"]
+}
+```
+
+`pathScope` is `off` | `warn` (default) | `flag`; a missing file means the defaults.
+
+`.agents/jev-roles.json` — roles for `jev route` (`--roles-file R` or `DSH_OFFLOAD_JEV_ROLES`
+overrides):
+
+```json
+[
+  { "name": "Backend", "mission": "Services, APIs, storage" },
+  { "name": "Docs",    "mission": "README, guides, examples" }
+]
+```
+
+Full contract, the question wordings, and every measured number:
 [SKILL.md § Jev judgments (optional)](.agents/skills/deepseek-offload/SKILL.md#jev-judgments-optional).
 
 ## Why jobs land under a project folder (and used to land in "Ungrouped")
@@ -229,6 +322,17 @@ predates the plugin.
   message rather than accepting a trailer or a "verified in production" sentence the child invented.
 - **The bridge never forwards itself** — a server named `deepseek`, or a stdio server whose argv
   points back at `server.cjs`, is skipped, so a delegated agent cannot recurse into another one.
+- **The Jev key stays in the environment.** `TYPESAFE_API_KEY` / `TYPESAFE_AI_API` are read from the
+  environment on every call and are never printed, logged, or written into a report; `TYPESAFE_API_URL`
+  overrides the endpoint (the test suites point it at a local stub, so the real API is never called).
+  Never put the key in a job prompt or a config file.
+- **Jev never approves anything, and its flags are not verdicts.** A flagged hunk is a signal to read
+  the diff, not a failure, and a clean review is not a sign-off. Because Jev 1.13 can be steered by the
+  content of its state, the rules that must not depend on a model (`neverTouch`, `pathScope`,
+  `ignorePaths`) are code and run before any Jev call.
+- **The self-check server reads the evidence itself.** `.agents/mcp-jev/server.cjs` resolves each cited
+  path and reads the lines itself; caller-supplied evidence text is ignored, so a worker cannot
+  manufacture the support for its own claim.
 
 ## Configuration
 
@@ -251,6 +355,14 @@ Bridge and runner environment (all optional):
 | `DEEPSEEK_WORKSPACE_ATTACH_DIR` | Adoption inbox override. |
 | `DSH_BRIDGE_PROJECT_ROOT`, `DSH_OFFLOAD_JOB_DIR` | Where job records live. Default `<cwd>/scratch/dsh-offload`. |
 | `DSH_GUI_URL` | GUI URL printed in job output. Default `http://127.0.0.1:3080`. |
+| `TYPESAFE_API_KEY` / `TYPESAFE_AI_API` | Jev API key; set either to enable every `jev` command. Default: unset (Jev disabled). |
+| `TYPESAFE_API_URL` | Jev endpoint. Default `https://api.typesafe.ai/v1/systemone` (the test suites point it at a local stub). |
+| `DSH_OFFLOAD_REVIEW_REPO` | Default for `start`/`resume --review-repo`. Default: unset (no auto-review). |
+| `DSH_OFFLOAD_JEV_LINT` | `1` runs the Jev lint on every `start`. Default: unset. |
+| `DSH_OFFLOAD_JEV_WATCH` | `1` enables `wait --jev-watch`. Default: unset. |
+| `DSH_OFFLOAD_JEV_CONFIG` | Overrides the hard-rules config path. Default `<projectRoot>/.agents/jev.json`. |
+| `DSH_OFFLOAD_JEV_ROLES` | Overrides the `jev route` roles file. Default `<projectRoot>/.agents/jev-roles.json`. |
+| `DSH_OFFLOAD_SESSION_TAIL` | Tailer `jev watch` / `jev triage` run. Default: the sibling `session-tail.mjs`. |
 
 ## Troubleshooting
 
@@ -262,15 +374,27 @@ Bridge and runner environment (all optional):
 | `session/new` fails with a bare `Internal error` | A forwarded MCP server failed to start (DSH does not name it): run `mcp-servers --mcp-config <file>`. |
 | `references unset environment variable X` | A forwarded server's config uses `${X}` and the bridge's environment lacks it. |
 | `dsh --profile acp exited with code …` | The `acp` profile cannot initialize: run `dsh --profile acp --dump-config` and read the error. |
+| A jev command prints `jev: disabled — set TYPESAFE_API_KEY` | Jev is optional: export `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`) to enable it. That line is a skip, not an error. |
+| Review flags legitimate hunks on a by-reference work order | Known limit (known-answer evaluation, 2026-09-27): a work order that describes its changes by reference ("replay/merge another branch", "merge duplicated logic") cannot be judged against the text alone. Review those hunks against the original work orders; the flags are a look-here list, not findings. |
+| `jevReview.state` is `empty`, block says `jev review: no changes in the review range` | The review repo had no changes between `--review-base` and HEAD (and no untracked files). Point `--review-repo` at the clone the job actually changed. |
+| A job error carrying `EROFS` / `EACCES` / `permission denied` | `jev triage` classifies it as an `environment` failure (code rule, no key needed): fix the path/permissions, then `resume`. |
+| You want to confirm the jev links are current | `doctor` has no separate Jev check and never looks at a key, and its `project entries current` line does not cover `scripts/jev` or `.agents/mcp-jev/server.cjs`. Re-run `install.sh --update` to refresh stale links; it replaces those like any other project entry. |
 
 ## Tests
 
 ```sh
-node --test tests/install.test.mjs .agents/dsh-workspace-attach/tests/adopt.test.js .agents/dsh-workspace-attach/tests/inbox.test.js
+npm test
 ```
 
-Covers the installer's profile-patch text surgery (fenced rows, replacing an unmanaged row,
-restoring a valid empty patch file) and the plugin's adoption and inbox protocol.
+`npm test` runs `node --test` over thirteen files: `tests/install.test.mjs`, `session-tail`,
+`git-guard`, `bridge-guard`, `read-only`, `resume`, the five Jev suites (`jev`, `jev-auto`,
+`jev-hardening`, `jev-planning`, `jev-selfcheck`), and the workspace-attach plugin's `adopt` and
+`inbox` tests. `tests/prompt-file.test.mjs` exists but is not wired into `npm test`; run it directly
+with `node --test tests/prompt-file.test.mjs`.
+
+The Jev suites point `TYPESAFE_API_URL` at a local HTTP stub and set a dummy `TYPESAFE_API_KEY`, so
+the real API is never called; they also assert the key is never echoed into stdout, stderr, or the
+report file.
 
 ## License
 
