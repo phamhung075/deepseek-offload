@@ -305,9 +305,15 @@ export function renderJevBlock(jevReview, { jobsDir, jobId }) {
     lines.push(line)
   }
   const lookHere = report.lookHere ?? []
-  lines.push(lookHere.length === 0
-    ? 'look here (none)'
-    : `look here: ${lookHere.map((entry) => `${entry.file} ${entry.range} in_scope=${probability(entry.inScope)}`).join('  ')}`)
+  if (lookHere.length === 0) {
+    lines.push('look here (none)')
+  } else {
+    lines.push('look here:')
+    for (const entry of lookHere) {
+      const reason = entry.reason ? `  (${entry.reason})` : ''
+      lines.push(`  ${probability(entry.inScope)}  ${entry.file} ${entry.range}${reason}`)
+    }
+  }
   if (jevReview.claimsFlagged === true) {
     const claims = readClaimsReport(jobsDir, jobId)
     const unsupported = claims?.unsupported ?? []

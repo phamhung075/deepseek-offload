@@ -17,6 +17,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { renderJevBlock } from '../.agents/skills/deepseek-offload/scripts/jev/auto.mjs'
 
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 const SECRET_KEY = 'sk-test-SECRET-KEY-jev-auto'
@@ -316,6 +317,27 @@ test('a clean worker commit records state clean and shows a clean block', async 
   assert.match(waited.stdout, /--- jev review \(pre-screen/)
   assert.match(waited.stdout, /clean/)
   assert.match(waited.stdout, /look here \(none\)/)
+})
+
+test('the look-here list prints the header then one entry per line', () => {
+  const fx = fixture('lookhere-lines')
+  const jobId = 'job-lookhere'
+  const report = {
+    flagged: true,
+    rules: { findings: [] },
+    groups: [],
+    lookHere: [
+      { inScope: 0.031, file: 'a.mjs', range: '@@ -1,2 +1,3 @@', reason: 'lowest in_scope in a flagged group' },
+      { inScope: 0.12, file: 'b.mjs', range: '@@ -9,1 +9,2 @@', reason: 'large hunk (7 changed lines) below 0.3' },
+    ],
+  }
+  fs.writeFileSync(path.join(fx.jobRoot, 'jobs', `${jobId}.jev-review.json`), JSON.stringify(report))
+  const block = renderJevBlock({ state: 'flagged' }, { jobsDir: path.join(fx.jobRoot, 'jobs'), jobId })
+  const lines = block.split('\n')
+  assert.equal(lines.filter((line) => line === 'look here:').length, 1, block)
+  assert.ok(lines.includes('  0.031  a.mjs @@ -1,2 +1,3 @@  (lowest in_scope in a flagged group)'), block)
+  assert.ok(lines.includes('  0.120  b.mjs @@ -9,1 +9,2 @@  (large hunk (7 changed lines) below 0.3)'), block)
+  assert.ok(!lines.some((line) => /^look here: /.test(line)), 'the entries are not joined onto the header line')
 })
 
 test('no key: state disabled, the block says so, and the stub is never called', async (t) => {

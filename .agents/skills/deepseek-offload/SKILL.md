@@ -474,7 +474,8 @@ pre-screened:
 ```
 --- jev review (pre-screen; the orchestrator still reviews every diff) ---
 3f2a1b0  flagged  P(none)=0.200  chosen h0 a.txt @@ -1,3 +1,3 @@
-look here: a.txt @@ -1,3 +1,3 @@ in_scope=0.120
+look here:
+  0.120  a.txt @@ -1,3 +1,3 @@  (lowest in_scope in a flagged group)
 report: scratch/dsh-offload/jobs/<jobId>.jev-review.json
 ```
 
@@ -555,6 +556,8 @@ node "$OFF" jev review --prompt-file task.md --repo "$PWD" --base <old-sha>
 For a resumed job, `review` follows `resumeOf` back to the original job's prompt. Use its
 `look here` list (or `report.lookHere` in `--json`) as the starting point for your own review — it
 ranks where to look; it does not decide.
+
+Observed limit (2026-09-27, first automatic review of a real job): a job whose work order describes its changes only by reference — replay or merge another branch's commits, or "merge duplicated logic" in general terms — gets its legitimate hunks flagged (4 of 7 commits in that job), because the review can only judge hunks against the text it is given. For such jobs, review against the original work orders (`jev review --prompt-file <original order>` per replayed range) and treat the flags as a look-here list, not as findings.
 
 **`jev claims` — report claim check (measured).** Code extracts the report's own `path:line` /
 `path:~line` / `path:line-line` citations with the sentence that carries each one, then reads ±6 lines
