@@ -8,12 +8,16 @@
 import { runReview } from './review.mjs'
 import { runLint } from './lint.mjs'
 import { runWatch } from './watch.mjs'
+import { commandClaims } from './claims.mjs'
+import { commandDecide, commandLog } from './decide.mjs'
+import { commandTriage } from './triage.mjs'
 
 /** Shown by `dsh-offload jev help` and appended to the runner's usage. */
 export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV] [--json]
   jev review --prompt-file F --repo DIR --base REV [--head REV] [--json]
                                pre-screen a job's diff against its work order;
-                               exit 3 when flagged, 0 when clean. Writes
+                               hard rules first (neverTouch/pathScope), then
+                               Jev; exit 3 when flagged, 0 when clean. Writes
                                <jobId>.jev-review.json beside the job record.
   jev lint --prompt-file F [--read-only] [--json]
                                brief, UNVALIDATED work-order check; advisory,
@@ -22,11 +26,24 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
                                UNVALIDATED progress triage; exit 4 on a
                                looping/blocked/off-task verdict, 0 on settle.
                                Run it with run_in_background: true.
+  jev claims <jobId> --repo DIR [--rev REV] [--json]
+                               check the report's path:line claims against ±6
+                               lines at REV (default HEAD); lists unsupported
+                               claims (threshold 0.3). Never flags the diff.
+  jev decide <jobId> accept|reject|partial [--note TEXT] [--json]
+                               record a label and append it to jev-log.jsonl
+                               (pure local; no key needed).
+  jev log [--json]             decision counts and flagged/clean agreement,
+                               with a P(none) what-if at 0.4/0.5/0.6.
+  jev triage <jobId> [--json]  failure triage: code rules first, then one
+                               UNVALIDATED Jev failure_kind when no rule
+                               matches. Never auto-resumes.
                              Auto-review is configured on start/resume with
                              --review-repo DIR (or DSH_OFFLOAD_REVIEW_REPO); the
                              worker runs it when the job settles and result/wait
                              print the stored block (--jev-exit exits 3 on a
-                             flagged review).
+                             flagged review). wait --jev-watch stops early on a
+                             confident watch problem.
                              Jev is optional (TYPESAFE_API_KEY or
                              TYPESAFE_AI_API; endpoint TYPESAFE_API_URL).
                              It is a pre-screen — the orchestrator still
@@ -51,6 +68,14 @@ export async function runJevCli(positional, flags, ctx) {
       return runLint(rest, flags, ctx)
     case 'watch':
       return runWatch(rest, flags, ctx)
+    case 'claims':
+      return commandClaims(rest, flags, ctx)
+    case 'decide':
+      return commandDecide(rest, flags, ctx)
+    case 'log':
+      return commandLog(rest, flags, ctx)
+    case 'triage':
+      return commandTriage(rest, flags, ctx)
     case undefined:
     case 'help':
     case '--help':

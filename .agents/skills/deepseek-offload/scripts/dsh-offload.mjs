@@ -1424,6 +1424,21 @@ async function commandResult(positional, flags, { waitForReview = false } = {}) 
     const block = auto.renderJevBlock(job.jevReview, { jobsDir: JOBS_DIR, jobId })
     if (block !== null) process.stdout.write(`\n${block}\n`)
   }
+  // A failed job gets the failure triage: code rules first, one UNVALIDATED Jev
+  // choice only if no rule matched. It never resumes anything.
+  if (job.state === 'error') {
+    try {
+      const { triageJob, renderTriageBlock } = await import('./jev/triage.mjs')
+      const triage = await triageJob(jobId, job, {
+        env: process.env,
+        projectRoot: PROJECT_ROOT,
+        sessionTail: process.env.DSH_OFFLOAD_SESSION_TAIL || SESSION_TAIL,
+      })
+      if (triage !== null) process.stdout.write(`\n${renderTriageBlock(jobId, triage)}\n`)
+    } catch {
+      /* triage is advisory; it never changes the result */
+    }
+  }
   return jevExit ?? (job.state === 'error' ? 1 : 0)
 }
 
@@ -1637,12 +1652,46 @@ async function commandWait(positional, flags) {
   // waiting — then one line per state change and a heartbeat every 15s.
   const human = flags.json !== true
   if (human) process.stdout.write(`${describeJob(job, { full: true })}\n\nwaiting   for the job to settle; Ctrl-C stops waiting, not the job\n`)
+
+  // Optional early-return watch: while waiting, reuse the `jev watch` triage so
+  // a confident looping/blocked/off-task verdict stops the wait (exit 4) and
+  // the job keeps running. Jev is optional, so no key means no watcher.
+  const jevWatch = flags['jev-watch'] === true || process.env.DSH_OFFLOAD_JEV_WATCH === '1'
+  let watcher = null
+  if (jevWatch) {
+    try {
+      const { isEnabled, DISABLED_LINE } = await import('./jev/client.mjs')
+      if (!isEnabled(process.env)) {
+        process.stdout.write(`${DISABLED_LINE}\n`)
+      } else {
+        const { createWaitWatcher } = await import('./jev/watch.mjs')
+        const parsed = Number(typeof flags['watch-interval-ms'] === 'string' ? flags['watch-interval-ms'] : 120000)
+        watcher = createWaitWatcher({
+          jobId,
+          intervalMs: Number.isFinite(parsed) && parsed >= 0 ? parsed : 120000,
+          env: process.env,
+          projectRoot: PROJECT_ROOT,
+          sessionTail: process.env.DSH_OFFLOAD_SESSION_TAIL || SESSION_TAIL,
+        })
+      }
+    } catch {
+      watcher = null
+    }
+  }
+
   let lastState = job.state
   let lastLine = Date.now()
   while (isActiveState(job.state)) {
     if (Date.now() > deadline) {
       process.stderr.write(`dsh-offload: wait timed out after ${timeoutMs}ms; job ${jobId} is still running.\n`)
       return 2
+    }
+    if (watcher !== null && watcher.due()) {
+      const problem = await watcher.probe(job)
+      if (problem !== null) {
+        process.stdout.write(`${problem}\n`)
+        return 4
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000))
     job = reconcileJob(readJob(jobId))
@@ -2194,6 +2243,11 @@ function usage() {
   wait   <jobId> [--timeout-ms N] [--json] [--jev-exit] [--no-jev-review]
                                block until the job settles, then print the result
                                (waits for an in-flight review up to 180000 ms)
+                                 --jev-watch  UNVALIDATED early return: reuse the
+                                   jev watch triage every --watch-interval-ms
+                                   (default 120000, env DSH_OFFLOAD_JEV_WATCH=1)
+                                   and exit 4 on a confident looping/blocked/
+                                   off-task verdict, leaving the job running
   update <jobId> "<new info>"    steer a running job onto the right track
   cancel <jobId>                stop a running job outright, no redirect
   list   [--all] [--json]      recent jobs
@@ -2216,6 +2270,16 @@ function usage() {
                                UNVALIDATED progress triage; exit 4 on a
                                looping/blocked/off-task verdict, run it with
                                run_in_background: true
+  jev claims <jobId> --repo DIR [--rev REV] [--json]
+                               check the report's path:line claims against ±6
+                               lines at REV (default HEAD); threshold 0.3;
+                               never flags the diff review
+  jev decide <jobId> accept|reject|partial [--note TEXT] [--json]
+                               record a label and append it to jev-log.jsonl
+  jev log [--json]             decision counts, flagged/clean agreement, and a
+                               P(none) what-if at 0.4/0.5/0.6
+  jev triage <jobId> [--json]  failure triage (code rules first, then one
+                               UNVALIDATED Jev failure_kind); never auto-resumes
                                Jev is optional and a pre-screen only — the
                                orchestrator still reviews every diff.
 
@@ -2232,6 +2296,8 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              TYPESAFE_API_URL (override the Jev endpoint),
              DSH_OFFLOAD_REVIEW_REPO (start/resume default for --review-repo),
              DSH_OFFLOAD_JEV_LINT (=1 to run the Jev lint on every start),
+             DSH_OFFLOAD_JEV_WATCH (=1 to enable wait --jev-watch),
+             DSH_OFFLOAD_JEV_CONFIG (override <projectRoot>/.agents/jev.json),
              DSH_OFFLOAD_SESSION_TAIL (override the tailer jev watch runs)
 `)
 }
