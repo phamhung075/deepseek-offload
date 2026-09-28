@@ -18,7 +18,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { callJev, isEnabled, DISABLED_LINE, pool, CONCURRENCY, probability } from './client.mjs'
-import { buildGroups, chunkHunks } from './diff.mjs'
+import { buildGroups, chunkHunks, REVIEW_SCOPES, SCOPE_ALL } from './diff.mjs'
 import { resolvePromptFile, readPromptFile } from './prompt-file.mjs'
 import { HUNK_QUESTIONS, NONE_CHOICE, oddHunkRequest, ODD_HUNK_ID } from './questions.mjs'
 import {
@@ -122,6 +122,7 @@ function renderHuman(report, ctx) {
   lines.push("jev review — pre-screen for the orchestrator's review; Jev does not approve anything")
   lines.push(`repo       ${report.repo}`)
   lines.push(`range      ${report.base}..${report.head}`)
+  if (report.scope !== SCOPE_ALL) lines.push(`scope      ${report.scope}`)
   lines.push(`work order ${report.workOrderSource}`)
   lines.push(`groups     ${report.groups.length}`)
   lines.push('')
@@ -183,6 +184,11 @@ export async function runReview(positional, flags, ctx) {
   const repo = typeof flags.repo === 'string' ? flags.repo : null
   const base = typeof flags.base === 'string' ? flags.base : null
   const head = typeof flags.head === 'string' ? flags.head : 'HEAD'
+  const scope = typeof flags.scope === 'string' ? flags.scope : SCOPE_ALL
+  if (!REVIEW_SCOPES.includes(scope)) {
+    ctx.stderr.write(`dsh-offload: jev review --scope must be one of ${REVIEW_SCOPES.join('|')}\n`)
+    return EXIT_ERROR
+  }
   if (repo === null) {
     ctx.stderr.write('dsh-offload: jev review requires --repo DIR\n')
     return EXIT_ERROR
@@ -218,7 +224,7 @@ export async function runReview(positional, flags, ctx) {
 
   let groups
   try {
-    groups = buildGroups({ repo, base, head })
+    groups = buildGroups({ repo, base, head, scope })
   } catch (error) {
     ctx.stderr.write(`dsh-offload: git failed: ${error.message}\n`)
     return EXIT_ERROR
@@ -241,7 +247,7 @@ export async function runReview(positional, flags, ctx) {
   if (loaded.warning !== null) ctx.stderr.write(`dsh-offload: ${loaded.warning}\n`)
 
   if (groups.length === 0) {
-    ctx.stdout.write(`jev review: no changes in ${base}..${head} to review\n`)
+    ctx.stdout.write('jev review: no changes in the review range to review\n')
     return EXIT_CLEAN
   }
 
@@ -347,6 +353,7 @@ export async function runReview(positional, flags, ctx) {
     repo,
     base,
     head,
+    scope,
     workOrderSource: source,
     flagged,
     ruleFlagged,

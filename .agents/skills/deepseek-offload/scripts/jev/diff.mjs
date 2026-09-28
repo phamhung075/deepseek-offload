@@ -1,11 +1,12 @@
 /**
  * Git diff collection and hunk splitting for `jev review`.
  *
- * A "group" is one commit in `BASE..HEAD`, or the untracked files as one extra
- * group. Each group is an ordered list of hunks, each carrying its file and its
- * `@@` header so a flagged range can be pointed at precisely. Binary hunks and
- * lockfiles are dropped; each hunk is truncated so one large file cannot crowd
- * out the rest of the request.
+ * A "group" is one commit in `BASE..HEAD`, the working tree's uncommitted
+ * changes (`git diff HEAD`, tracked files only), or the untracked files. Each
+ * group is an ordered list of hunks, each carrying its file and its `@@` header
+ * so a flagged range can be pointed at precisely. Binary hunks and lockfiles are
+ * dropped; each hunk is truncated so one large file cannot crowd out the rest of
+ * the request.
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -29,6 +30,21 @@ export const LOCKFILES = new Set(['package-lock.json', 'Cargo.lock', 'go.sum', '
 export const UNTRACKED_SHA = 'untracked'
 export const UNTRACKED_SUBJECT = 'untracked files'
 
+/**
+ * Synthetic group identity for the working-tree group: tracked files with
+ * staged and/or unstaged changes, compared to HEAD so commits in `BASE..HEAD`
+ * are never counted twice. It is rendered as `worktree` in the review block,
+ * and its subject is deliberately the state, not a commit.
+ */
+export const WORKTREE_SHA = 'worktree'
+export const WORKTREE_SUBJECT = 'uncommitted changes'
+
+/** What a review covers: every commit in range, or only uncommitted + untracked. */
+export const SCOPE_ALL = 'all'
+export const SCOPE_UNCOMMITTED = 'uncommitted'
+export const REVIEW_SCOPES = [SCOPE_ALL, SCOPE_UNCOMMITTED]
+
+const HEAD = 'HEAD'
 const GIT_MAX_BUFFER = 64 * 1024 * 1024
 
 function git(repo, args) {
@@ -110,6 +126,18 @@ export function untrackedFiles(repo) {
 }
 
 /**
+ * The uncommitted changes of tracked files relative to `head` (staged and
+ * unstaged together), split into hunks. `git diff HEAD` is used so a commit
+ * already in `BASE..HEAD` is not reviewed twice.
+ * @returns the synthetic `worktree` group, or null when nothing changed.
+ */
+export function worktreeGroup(repo, head = HEAD) {
+  const hunks = splitHunks(git(repo, ['diff', '--no-color', '--unified=3', head]))
+  if (hunks.length === 0) return null
+  return { kind: 'worktree', sha: WORKTREE_SHA, subject: WORKTREE_SUBJECT, hunks }
+}
+
+/**
  * Turn one untracked file into a synthetic new-file hunk, or null when it is a
  * lockfile, binary, unreadable, or empty.
  * @param repo - absolute repository path.
@@ -149,17 +177,23 @@ export function untrackedHunk(repo, file) {
 }
 
 /**
- * Collect the review groups for `base..head`: one per commit with at least one
- * hunk, plus one group for the untracked files.
- * @returns `{kind, sha, subject, hunks}[]` in commit order, untracked last.
+ * Collect the review groups: one per commit in `base..head` with at least one
+ * hunk (unless `scope` is `uncommitted`), then the uncommitted tracked changes,
+ * then the untracked files. The worktree group is diffed against `head`, so it
+ * never repeats a commit already in range.
+ * @returns `{kind, sha, subject, hunks}[]`; commits first, untracked last.
  */
-export function buildGroups({ repo, base, head = 'HEAD' }) {
+export function buildGroups({ repo, base, head = HEAD, scope = SCOPE_ALL }) {
   const groups = []
-  for (const sha of shasInRange(repo, base, head)) {
-    const hunks = splitHunks(commitDiff(repo, sha))
-    if (hunks.length === 0) continue
-    groups.push({ kind: 'commit', sha, subject: commitSubject(repo, sha), hunks })
+  if (scope !== SCOPE_UNCOMMITTED) {
+    for (const sha of shasInRange(repo, base, head)) {
+      const hunks = splitHunks(commitDiff(repo, sha))
+      if (hunks.length === 0) continue
+      groups.push({ kind: 'commit', sha, subject: commitSubject(repo, sha), hunks })
+    }
   }
+  const worktree = worktreeGroup(repo, head)
+  if (worktree !== null) groups.push(worktree)
   const untracked = untrackedFiles(repo).map((file) => untrackedHunk(repo, file)).filter(Boolean)
   if (untracked.length > 0) {
     groups.push({ kind: 'untracked', sha: UNTRACKED_SHA, subject: UNTRACKED_SUBJECT, hunks: untracked })

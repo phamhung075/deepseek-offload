@@ -23,6 +23,7 @@ import { isEnabled, probability } from './client.mjs'
 import { runReview, EXIT_CLEAN, EXIT_FLAGGED } from './review.mjs'
 import { runClaims, extractClaims, readClaimsReport } from './claims.mjs'
 import { readResultText } from './job-result.mjs'
+import { UNTRACKED_SHA, WORKTREE_SHA } from './diff.mjs'
 
 /** Bound the whole in-process review; a slow API must not hold the worker forever. */
 export const AUTO_REVIEW_TIMEOUT_MS = 180_000
@@ -270,7 +271,12 @@ export async function ensureJevReview(jobId, job, opts) {
   }
 }
 
-const shortSha = (sha) => (sha === 'untracked' ? 'untracked' : String(sha ?? 'unknown').slice(0, 7))
+/**
+ * A group label for the block: synthetic groups keep their whole name, commits
+ * are shortened to the usual 7 characters.
+ */
+const SYNTHETIC_SHAS = new Set([UNTRACKED_SHA, WORKTREE_SHA])
+const shortSha = (sha) => (SYNTHETIC_SHAS.has(sha) ? sha : String(sha ?? 'unknown').slice(0, 7))
 
 /**
  * Render the compact block `result` / `wait` appends for a settled job. The
