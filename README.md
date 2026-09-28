@@ -263,7 +263,9 @@ dispatch; their `UNVALIDATED` or synthetic-only labels live in the
 }
 ```
 
-`pathScope` is `off` | `warn` (default) | `flag`; a missing file means the defaults.
+`pathScope` is `off` | `warn` (default) | `flag`; a missing file means the defaults. A hunk in the
+same directory as a named **file** (a named path whose basename has an extension) is in scope; a
+directory name or a hunk in another directory keeps the prefix/basename rules.
 
 `.agents/jev-roles.json` — roles for `jev route` (`--roles-file R` or `DSH_OFFLOAD_JEV_ROLES`
 overrides):

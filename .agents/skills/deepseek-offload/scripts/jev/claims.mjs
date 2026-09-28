@@ -3,8 +3,11 @@
  *
  * Code (not Jev) extracts the `path:line` / `path:~line` / `path:line-line`
  * citations and their sentence, then reads ±6 lines at the job's reviewed head
- * with `git show REV:path`. One `noul` question per claim judges whether those
- * lines say what the sentence claims. Instructions, criteria and the 0.3
+ * with `git show REV:path`. A citation that is not a literal path at REV is
+ * resolved against the tracked files by path suffix (`billing/postgres.go` and
+ * `postgres.go` each find their unique tracked file; several matches are
+ * counted `skipped.ambiguous`). One `noul` question per claim judges whether
+ * those lines say what the sentence claims. Instructions, criteria and the 0.3
  * threshold are copied from the known-answer evaluation (2026-09-27: AUC 0.950,
  * precision 0.905 / recall 0.826).
  *
@@ -28,6 +31,12 @@ export const EVIDENCE_RADIUS = 6
 /** Truncation bounds from the evaluation's state shape. */
 export const CLAIM_TEXT_MAX = 1000
 export const EVIDENCE_CHARS_MAX = 2000
+
+/** git read buffer for one cited file or the tracked-file listing. */
+export const GIT_MAX_BUFFER = 32 * 1024 * 1024
+
+/** `error.code` `readEvidence` sets when several tracked paths match a citation. */
+export const AMBIGUOUS_CITED_PATH = 'AMBIGUOUS_CITED_PATH'
 
 export const EXIT_CLAIMS_OK = 0
 export const EXIT_CLAIMS_ERROR = 1
@@ -83,6 +92,35 @@ export function extractClaims(text) {
 }
 
 /**
+ * List the tracked files a citation can be resolved against: the tree at
+ * `source.rev` (`git ls-tree -r --name-only REV`) or, for `{worktree: true}`,
+ * the index (`git ls-files`). Callers that resolve several citations list this
+ * once and hand it back through `readEvidence`'s `trackedFiles` option.
+ */
+export function listTrackedFiles(repo, source = {}) {
+  const args = source?.worktree === true
+    ? ['-C', repo, 'ls-files', '-z']
+    : ['-C', repo, 'ls-tree', '-r', '--name-only', '-z', `${source?.rev ?? 'HEAD'}`]
+  const out = execFileSync('git', args, { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER, stdio: ['ignore', 'pipe', 'pipe'] })
+  return out.split('\0').filter((entry) => entry !== '')
+}
+
+/**
+ * Resolve a cited path against the tracked files by suffix match on a `/`
+ * boundary: a tracked path equal to the citation or ending in `/` + citation
+ * (so `handlers_jobs.go` and `billing/postgres.go` find their one tracked file).
+ * @returns `{path}` for exactly one match, `{ambiguous: true}` for several, and
+ * `null` when none matches.
+ */
+export function resolveTrackedPath(citedPath, tracked) {
+  const needle = String(citedPath ?? '').replace(/^\.\//, '')
+  const matches = tracked.filter((file) => file === needle || file.endsWith(`/${needle}`))
+  if (matches.length === 1) return { path: matches[0] }
+  if (matches.length > 1) return { ambiguous: true }
+  return null
+}
+
+/**
  * Read ±`radius` numbered lines around `citedPath:line`.
  *
  * The evidence source is explicit: `{rev}` reads that git revision
@@ -90,22 +128,54 @@ export function extractClaims(text) {
  * `{worktree: true}` reads the file on disk (for the `mcp-jev` self-check of an
  * answer not yet committed). Either way the reader is the server — no caller
  * ever supplies evidence text.
- * @returns `{path, line, lines, fileLines, lo, hi}`; throws when unreadable.
+ *
+ * The literal citation is tried first. When it does not exist, the path is
+ * resolved against the tracked files (a bare `handlers_jobs.go` or a partial
+ * `billing/postgres.go` finds its unique tracked file); the resolved path is
+ * returned as `path` and the citation as `citedPath`. Several matches throw an
+ * error coded `AMBIGUOUS_CITED_PATH`; none rethrows the read failure. An
+ * absolute `{worktree: true}` path is read unchanged. `options.trackedFiles` is
+ * an optional memoised `() => string[]` so a multi-claim run lists git once.
+ * @returns `{path, citedPath, line, lines, fileLines, lo, hi}`; throws when unreadable.
  */
-export function readEvidence(repo, source, citedPath, line, radius = EVIDENCE_RADIUS) {
-  const out = source?.worktree === true
-    ? fs.readFileSync(path.isAbsolute(citedPath) ? citedPath : path.resolve(repo, citedPath), 'utf8')
-    : execFileSync('git', ['-C', repo, 'show', `${source?.rev ?? 'HEAD'}:${citedPath}`], {
+export function readEvidence(repo, source, citedPath, line, radius = EVIDENCE_RADIUS, options = {}) {
+  const worktree = source?.worktree === true
+  const readAt = (filePath) => (worktree
+    ? fs.readFileSync(path.isAbsolute(filePath) ? filePath : path.resolve(repo, filePath), 'utf8')
+    : execFileSync('git', ['-C', repo, 'show', `${source?.rev ?? 'HEAD'}:${filePath}`], {
       encoding: 'utf8',
-      maxBuffer: 32 * 1024 * 1024,
-    })
+      maxBuffer: GIT_MAX_BUFFER,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }))
+
+  let resolvedPath = citedPath
+  let out
+  if (worktree && path.isAbsolute(citedPath)) {
+    out = readAt(citedPath)
+  } else {
+    try {
+      out = readAt(citedPath)
+    } catch (readError) {
+      const tracked = typeof options.trackedFiles === 'function' ? options.trackedFiles() : listTrackedFiles(repo, source)
+      const resolved = resolveTrackedPath(citedPath, tracked)
+      if (resolved === null) throw readError
+      if (resolved.ambiguous === true) {
+        const error = new Error(`several tracked files match the citation ${citedPath}`)
+        error.code = AMBIGUOUS_CITED_PATH
+        throw error
+      }
+      resolvedPath = resolved.path
+      out = readAt(resolvedPath)
+    }
+  }
+
   const lines = out.split('\n')
   const center = Number.isSafeInteger(line) && line > 0 ? line : 1
   const lo = Math.max(1, center - radius)
   const hi = Math.min(lines.length, center + radius)
   const numbered = []
   for (let n = lo; n <= hi; n++) numbered.push(`${n}: ${lines[n - 1]}`)
-  return { path: citedPath, line: center, lines: numbered.join('\n'), fileLines: lines.length, lo, hi }
+  return { path: resolvedPath, citedPath, line: center, lines: numbered.join('\n'), fileLines: lines.length, lo, hi }
 }
 
 /**
@@ -154,7 +224,10 @@ export async function runClaims(jobId, job, ctx, opts = {}) {
 
   const found = extractClaims(text)
   const selected = found.slice(0, CLAIMS_MAX)
-  const skipped = { missingFile: 0, cap: Math.max(0, found.length - selected.length) }
+  const skipped = { missingFile: 0, ambiguous: 0, cap: Math.max(0, found.length - selected.length) }
+  // The tracked-file listing is computed once, on the first literal-path miss.
+  let trackedFiles = null
+  const trackedProvider = () => (trackedFiles ??= listTrackedFiles(repo, { rev }))
 
   const units = []
   for (const claim of selected) {
@@ -163,9 +236,13 @@ export async function runClaims(jobId, job, ctx, opts = {}) {
       continue
     }
     try {
-      units.push({ claim, evidence: readEvidence(repo, { rev }, claim.path, claim.line) })
-    } catch {
-      skipped.missingFile++
+      units.push({
+        claim,
+        evidence: readEvidence(repo, { rev }, claim.path, claim.line, EVIDENCE_RADIUS, { trackedFiles: trackedProvider }),
+      })
+    } catch (error) {
+      if (error?.code === AMBIGUOUS_CITED_PATH) skipped.ambiguous++
+      else skipped.missingFile++
     }
   }
 
@@ -196,6 +273,7 @@ export async function runClaims(jobId, job, ctx, opts = {}) {
     .filter((entry) => typeof entry.score === 'number' && entry.score < CLAIM_SUPPORT_THRESHOLD)
     .map((entry) => ({
       path: entry.unit.evidence.path,
+      citedPath: entry.unit.evidence.citedPath,
       line: entry.unit.evidence.line,
       endLine: entry.unit.claim.endLine,
       sentence: entry.unit.claim.sentence,
@@ -261,7 +339,7 @@ export async function commandClaims(positional, flags, ctx) {
     return EXIT_CLAIMS_OK
   }
   ctx.stdout.write(`jev claims — ${report.considered}/${report.total} citation(s) checked at ${report.rev}; threshold ${report.threshold}\n`)
-  ctx.stdout.write(`unsupported ${report.unsupportedCount}; skipped ${report.skipped.missingFile} missing file(s), ${report.skipped.cap} over the ${CLAIMS_MAX} cap\n`)
+  ctx.stdout.write(`unsupported ${report.unsupportedCount}; skipped ${report.skipped.missingFile} missing file(s), ${report.skipped.ambiguous} ambiguous, ${report.skipped.cap} over the ${CLAIMS_MAX} cap\n`)
   if (report.unsupported.length > 0) {
     ctx.stdout.write('claims to verify:\n')
     for (const claim of report.unsupported) {

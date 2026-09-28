@@ -617,7 +617,10 @@ zero requests). Config is `<projectRoot>/.agents/jev.json` (override the path wi
   as `.agents/` and `.env`, with citations, backticks and absolute paths normalized) and reports every
   hunk outside them as "outside paths named in the work order". A named path without a `/` (a bare
   file name such as `README.md` or `dsh-offload.mjs`) matches a hunk whose basename equals it at any
-  depth; a named path with a `/` keeps prefix semantics (that path and everything under it). Sibling
+  depth; a named path with a `/` keeps prefix semantics (that path and everything under it). A hunk in
+  the same directory as a named **file** (a name with `/` whose basename carries an extension, e.g. an
+  order naming `server-go/internal/mcp/mcp.go` covering a new `server-go/internal/mcp/batch.go`) is
+  also in scope; a directory name or a hunk in a different directory keeps the behaviour above. Sibling
   test files (`*_test.go`, `*.test.*`, `tests/`) are allowed. `warn` lists the finding,
   `flag` also flags the review. When the work order names no paths the rule is skipped and says so.
 - `ignorePaths` — matching files are skipped by the review entirely.
@@ -631,8 +634,11 @@ review still runs; it never crashes.
 `supported` — instructions and criteria verbatim from the known-answer evaluation, 2026-09-27 (AUC
 0.950 on 46+46 claims) — judges whether those lines say what the sentence claims; a score below the
 measured threshold `0.3` lists the claim under **claims to verify** (at 0.3: precision 0.905, recall
-0.826). Missing files are skipped and counted, and at most `CLAIMS_MAX = 40` claims are checked per
-job. Claims are a separate signal: they never flag the diff review, but they set
+0.826). A citation that is not a literal path at REV is resolved against the tracked files by path
+suffix (`billing/postgres.go` and a bare `postgres.go` each find their unique tracked file, and the
+report shows the resolved path); several tracked matches are skipped and counted under
+`skipped.ambiguous`. Missing files are skipped and counted, and at most `CLAIMS_MAX = 40` claims are
+checked per job. Claims are a separate signal: they never flag the diff review, but they set
 `jevReview.claimsFlagged`. The auto-review runs the check automatically whenever the job's result text
 contains citations; the report is stored as `<jobId>.jev-claims.json`.
 

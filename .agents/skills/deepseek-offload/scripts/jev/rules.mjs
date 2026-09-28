@@ -298,16 +298,42 @@ export function extractNamedPaths(workOrder, repo) {
 }
 
 /**
+ * The directory a named path sits in, when that named path is a FILE rather
+ * than a directory: only a path with a `/` whose basename carries a file
+ * extension qualifies (`server-go/internal/mcp/mcp.go`, not `server-go/internal/mcp`).
+ * @returns the directory string, or null when the name is a directory.
+ */
+function namedFileDir(value) {
+  const slash = value.lastIndexOf('/')
+  if (slash <= 0) return null
+  const base = value.slice(slash + 1)
+  return FILE_EXTENSION_RE.test(base) ? value.slice(0, slash) : null
+}
+
+/** Whether two directory strings are the same directory, on a `/` boundary. */
+function isSameDir(fileDir, namedDir) {
+  return fileDir === namedDir || fileDir.endsWith(`/${namedDir}`)
+}
+
+/**
  * Whether a hunk file is covered by a named path. A name with `/` matches as a
  * segment-aligned prefix or suffix at any depth (`scripts/jev/route.mjs` covers
  * `.agents/.../scripts/jev/route.mjs`); a bare file name without `/` matches a
- * hunk whose basename equals it at any depth.
+ * hunk whose basename equals it at any depth. A hunk in the same directory as a
+ * named FILE (a name with `/` whose basename has an extension) is also in
+ * scope: an order naming `server-go/internal/mcp/mcp.go` covers a new
+ * `server-go/internal/mcp/batch.go`. Directory names and globs are untouched,
+ * and a hunk in a different directory still warns.
  */
 export function isUnderNamedPath(file, named) {
-  const base = String(file ?? '').split('/').pop() ?? ''
+  const target = String(file ?? '')
+  const base = target.split('/').pop() ?? ''
+  const fileDir = target.includes('/') ? target.slice(0, target.lastIndexOf('/')) : ''
   for (const { value } of named) {
     if (value.includes('/')) {
-      if (file === value || file.startsWith(`${value}/`) || file.endsWith(`/${value}`) || file.includes(`/${value}/`)) return true
+      if (target === value || target.startsWith(`${value}/`) || target.endsWith(`/${value}`) || target.includes(`/${value}/`)) return true
+      const dir = namedFileDir(value)
+      if (dir !== null && fileDir !== '' && isSameDir(fileDir, dir)) return true
     } else if (base === value) {
       return true
     }
