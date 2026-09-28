@@ -25,8 +25,11 @@ const SECRET_KEY = 'sk-test-SECRET-KEY-jev-auto'
 
 /**
  * A stand-in for `dsh --profile acp` that, on the prompt turn, writes
- * `hello.txt` in the session cwd and commits it. It overrides
- * `GIT_CONFIG_GLOBAL` for its own git calls so an ambient guard cannot leak in.
+ * `hello.txt` in `STUB_COMMIT_DIR` (falling back to the session cwd) and
+ * commits it. The commit dir is separate from the session cwd so the job's
+ * cwd is not the review repo — the self-checkout guard then leaves
+ * `reviewScope` at `all`. It overrides `GIT_CONFIG_GLOBAL` for its own git
+ * calls so an ambient guard cannot leak in.
  */
 const STUB = `#!/usr/bin/env node
 'use strict'
@@ -36,7 +39,7 @@ const { execFileSync } = require('node:child_process')
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\\n')
 let buffer = ''
 let cwd = null
-const git = (...args) => execFileSync('git', ['-C', cwd, ...args], {
+const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], {
   encoding: 'utf8',
   env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
 })
@@ -52,10 +55,11 @@ process.stdin.on('data', (chunk) => {
     if (msg.id === undefined || msg.id === null) continue
     fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ method: msg.method, params: msg.params }) + '\\n')
     if (msg.method === 'session/prompt') {
-      if (cwd) {
-        fs.writeFileSync(path.join(cwd, 'hello.txt'), 'hello\\n')
-        git('add', '-A')
-        git('-c', 'user.email=stub@example.com', '-c', 'user.name=Stub', 'commit', '-q', '-m', 'add hello')
+      const target = process.env.STUB_COMMIT_DIR || cwd
+      if (target) {
+        fs.writeFileSync(path.join(target, 'hello.txt'), 'hello\\n')
+        git(target, 'add', '-A')
+        git(target, '-c', 'user.email=stub@example.com', '-c', 'user.name=Stub', 'commit', '-q', '-m', 'add hello')
       }
       send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } } } })
       send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } })
@@ -199,8 +203,11 @@ function readJob(fx, jobId) {
 
 /** Start a committing job in `repo` and wait for it; returns `{jobId, started, waited}`. */
 async function runJobToCompletion(fx, env, repo, extra = []) {
+  // The session cwd is fx.root (not a git work tree) and the stub commits in
+  // `repo`, so the review repo is not the job's own checkout: reviewScope 'all'.
+  env.STUB_COMMIT_DIR = repo
   const started = await run([
-    'start', 'add hello.txt and commit it', '--cwd', repo, '--review-repo', repo,
+    'start', 'add hello.txt and commit it', '--cwd', fx.root, '--review-repo', repo,
     '--allow-git-write', '--detach', '--json', ...extra,
   ], env, fx.root)
   assert.equal(started.status, 0, started.stderr)

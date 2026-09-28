@@ -1148,6 +1148,7 @@ async function commandStart(positional, flags) {
   const review = resolveStartReviewTarget({
     flags,
     env: process.env,
+    cwd,
     warn: (message) => process.stderr.write(`dsh-offload: ${message}\n`),
   })
 
@@ -1196,9 +1197,12 @@ async function commandStart(positional, flags) {
     readOnly: flags['read-only'] === true,
     // The clone the job changes, and the commit it started from. Both are set
     // only when `--review-repo` (or DSH_OFFLOAD_REVIEW_REPO) resolved; the
-    // worker reviews that clone's diff once the job settles.
+    // worker reviews that clone's diff once the job settles. `reviewScope`
+    // drops to 'uncommitted' when that clone is the job's own checkout, so the
+    // orchestrator's commits in the range are never graded.
     reviewRepo: review.reviewRepo,
     reviewBase: review.reviewBase,
+    reviewScope: review.reviewScope,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : DEFAULT_TIMEOUT_MS,
     sessionId: null,
     startedAt: now,
@@ -1343,6 +1347,7 @@ async function commandResume(positional, flags) {
     flags,
     env: process.env,
     source,
+    cwd: base.cwd,
     warn: (message) => process.stderr.write(`dsh-offload: ${message}\n`),
   })
 
@@ -1363,6 +1368,7 @@ async function commandResume(positional, flags) {
     // unless this resume named its own target.
     reviewRepo: review.reviewRepo,
     reviewBase: review.reviewBase,
+    reviewScope: review.reviewScope,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : (base.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     resumeOf: source === null ? null : source.jobId,
     resumeSessionId: sessionId,

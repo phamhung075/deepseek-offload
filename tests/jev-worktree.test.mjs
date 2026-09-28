@@ -110,9 +110,8 @@ function gitIn(repo, ...args) {
   return spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: GIT_ENV })
 }
 
-/** Init a repo with a base commit and one later commit that changes `a.txt`. */
-function makeRepo(root) {
-  const repo = path.join(root, 'repo')
+/** Init a repo directory with one base commit holding a.txt/b.txt/c.txt. */
+function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true })
   gitIn(repo, 'init', '-q')
   gitIn(repo, 'config', 'user.email', 'test@example.com')
@@ -122,7 +121,13 @@ function makeRepo(root) {
   }
   gitIn(repo, 'add', '-A')
   gitIn(repo, 'commit', '-q', '-m', 'base')
-  const base = gitIn(repo, 'rev-parse', 'HEAD').stdout.trim()
+  return gitIn(repo, 'rev-parse', 'HEAD').stdout.trim()
+}
+
+/** Init a repo with a base commit and one later commit that changes `a.txt`. */
+function makeRepo(root) {
+  const repo = path.join(root, 'repo')
+  const base = initRepo(repo)
   fs.writeFileSync(path.join(repo, 'a.txt'), 'alpha changed\n')
   gitIn(repo, 'add', '-A')
   gitIn(repo, 'commit', '-q', '-m', 'change a.txt')
@@ -130,18 +135,31 @@ function makeRepo(root) {
   return { repo, base, head }
 }
 
+/** A second, separate repository under `root` (a "clone"-like peer). */
+function makePeerRepo(root) {
+  const repo = path.join(root, 'peer')
+  const base = initRepo(repo)
+  return { repo, base }
+}
+
 /** Init a repo whose HEAD is the base, so `base..HEAD` is empty. */
 function makeCleanRepo(root) {
   const repo = path.join(root, 'repo')
-  fs.mkdirSync(repo, { recursive: true })
-  gitIn(repo, 'init', '-q')
-  gitIn(repo, 'config', 'user.email', 'test@example.com')
-  gitIn(repo, 'config', 'user.name', 'Test')
-  fs.writeFileSync(path.join(repo, 'a.txt'), 'alpha\n')
-  gitIn(repo, 'add', '-A')
-  gitIn(repo, 'commit', '-q', '-m', 'base')
-  const base = gitIn(repo, 'rev-parse', 'HEAD').stdout.trim()
+  const base = initRepo(repo)
   return { repo, base }
+}
+
+/** Write a job record into the store and return the jobs dir. */
+function writeJob(root, record) {
+  const jobsDir = path.join(root, 'jobs')
+  fs.mkdirSync(jobsDir, { recursive: true })
+  fs.writeFileSync(path.join(jobsDir, `${record.jobId}.json`), `${JSON.stringify(record, null, 2)}\n`)
+  return jobsDir
+}
+
+/** Read a job record back from the store. */
+function readJob(root, jobId) {
+  return JSON.parse(fs.readFileSync(path.join(root, 'jobs', `${jobId}.json`), 'utf8'))
 }
 
 /** Every hunk file the stub saw, across the per-hunk and per-group requests. */
@@ -280,4 +298,107 @@ test('a neverTouch path modified but uncommitted is a rule-flagged review', asyn
   assert.equal(out.status, 3, out.stdout + out.stderr)
   assert.match(out.stdout, /never-touch path/)
   assert.equal(stub.requests.length, 0, 'a flagging rule skips Jev')
+})
+
+// ---------------------------------------------------------------------------
+// Item 2: the self-checkout guard and reviewScope
+// ---------------------------------------------------------------------------
+
+test('reviewRepo equal to the job cwd warns and records reviewScope uncommitted', async (t) => {
+  const root = scratch('selfcheckout')
+  const { repo, base } = makeRepo(root)
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+
+  const started = await run(['start', 'change a.txt and report', '--cwd', repo, '--review-repo', repo, '--detach', '--json'], env, { cwd: root })
+  assert.equal(started.status, 0, started.stderr)
+  assert.match(started.stderr, /review repo is the checkout this job starts from/)
+  assert.match(started.stderr, /use a clone for commit review/)
+  const job = JSON.parse(started.stdout)
+  assert.equal(job.reviewScope, 'uncommitted')
+  assert.equal(readJob(root, job.jobId).reviewScope, 'uncommitted')
+  await run(['cancel', job.jobId], env, { cwd: root })
+})
+
+test('a review repo that is not the job cwd keeps reviewScope all and warns not at all', async (t) => {
+  const root = scratch('clone')
+  const { repo, base } = makeRepo(root)
+  const peer = makePeerRepo(root)
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+
+  const started = await run(['start', 'change a.txt and report', '--cwd', peer.repo, '--review-repo', repo, '--detach', '--json'], env, { cwd: root })
+  assert.equal(started.status, 0, started.stderr)
+  assert.doesNotMatch(started.stderr, /this job starts from/)
+  const job = JSON.parse(started.stdout)
+  assert.equal(job.reviewScope, 'all')
+  await run(['cancel', job.jobId], env, { cwd: root })
+})
+
+test('resume copies reviewScope from the resumed job', async (t) => {
+  const root = scratch('resume-scope')
+  const { repo, base } = makeRepo(root)
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+  writeJob(root, {
+    jobId: 'job-uncommitted',
+    state: 'done',
+    prompt: 'original task',
+    cwd: repo,
+    permission: 'allow',
+    allowGitWrite: false,
+    readOnly: false,
+    sessionId: 'session-scope',
+    reviewRepo: repo,
+    reviewBase: base,
+    reviewScope: 'uncommitted',
+    startedAt: Date.now() - 60_000,
+    finishedAt: Date.now() - 30_000,
+  })
+
+  const resumed = await run(['resume', 'job-uncommitted', '--json'], env, { cwd: root })
+  assert.equal(resumed.status, 0, resumed.stderr)
+  const job = JSON.parse(resumed.stdout)
+  assert.equal(job.reviewRepo, repo)
+  assert.equal(job.reviewScope, 'uncommitted')
+  await run(['cancel', job.jobId], env, { cwd: root })
+})
+
+test('reviewScope uncommitted skips a job-time commit but reviews the uncommitted change', async (t) => {
+  const root = scratch('scope-review')
+  const { repo, base } = makeRepo(root)
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+  const jobId = 'job-scope-review'
+  const jobsDir = writeJob(root, {
+    jobId,
+    state: 'done',
+    prompt: 'change b.txt and report',
+    cwd: repo,
+    reviewRepo: repo,
+    reviewBase: base,
+    reviewScope: 'uncommitted',
+    startedAt: Date.now() - 5000,
+    finishedAt: Date.now() - 1000,
+  })
+  fs.writeFileSync(path.join(jobsDir, `${jobId}.result.md`), 'changed b.txt\n')
+  // A commit that lands during the job (the orchestrator's, in the real case).
+  fs.writeFileSync(path.join(repo, 'c.txt'), 'charlie committed\n')
+  gitIn(repo, 'add', 'c.txt')
+  gitIn(repo, 'commit', '-q', '-m', 'orchestrator commit')
+  // The worker's uncommitted change.
+  fs.writeFileSync(path.join(repo, 'b.txt'), 'bravo uncommitted\n')
+
+  const out = await run(['result', jobId], env, { cwd: root })
+  assert.equal(out.status, 0, out.stderr)
+  const report = JSON.parse(fs.readFileSync(path.join(jobsDir, `${jobId}.jev-review.json`), 'utf8'))
+  assert.equal(report.scope, 'uncommitted')
+  const kinds = report.groups.map((group) => group.kind)
+  assert.deepEqual(kinds, ['worktree'], out.stdout)
+  assert.deepEqual(report.groups[0].hunks.map((hunk) => hunk.file), ['b.txt'])
+  assert.ok(!allHunkFiles(stub.requests).includes('c.txt'), 'the orchestrator commit is not reviewed')
 })

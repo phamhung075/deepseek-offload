@@ -23,7 +23,7 @@ import { isEnabled, probability } from './client.mjs'
 import { runReview, EXIT_CLEAN, EXIT_FLAGGED } from './review.mjs'
 import { runClaims, extractClaims, readClaimsReport } from './claims.mjs'
 import { readResultText } from './job-result.mjs'
-import { UNTRACKED_SHA, WORKTREE_SHA } from './diff.mjs'
+import { UNTRACKED_SHA, WORKTREE_SHA, SCOPE_ALL, SCOPE_UNCOMMITTED } from './diff.mjs'
 
 /** Bound the whole in-process review; a slow API must not hold the worker forever. */
 export const AUTO_REVIEW_TIMEOUT_MS = 180_000
@@ -39,6 +39,15 @@ export const REVIEW_RUNNING_LINE = 'jev review: running'
 
 /** Header of the compact block rendered from a stored report. */
 export const REVIEW_BLOCK_HEADER = '--- jev review (pre-screen; the orchestrator still reviews every diff) ---'
+
+/**
+ * One warning when `--review-repo` points at the checkout the job starts from:
+ * the orchestrator's own commits land in that range, so only uncommitted and
+ * untracked changes are safe to judge.
+ */
+export const SELF_CHECKOUT_WARNING =
+  'review repo is the checkout this job starts from; commits there may be the orchestrator\'s, '
+  + 'so only uncommitted and untracked changes are reviewed — use a clone for commit review'
 
 /** `runReview` prints this prefix when the range holds no changes to judge. */
 const NO_CHANGES_MARKER = 'no changes in'
@@ -116,25 +125,43 @@ function envReviewRepo(env) {
 }
 
 /**
+ * The review scope for a target: `uncommitted` when the review repo is the same
+ * checkout the job runs in (`cwd`), otherwise `all`. A cwd outside any git work
+ * tree (the common "job runs elsewhere, clone is reviewed" case) is `all`.
+ */
+export function reviewScopeFor(reviewRepo, cwd) {
+  if (typeof reviewRepo !== 'string' || reviewRepo === '') return SCOPE_ALL
+  const cwdTop = resolveReviewRepo(cwd)
+  return cwdTop !== null && cwdTop === reviewRepo ? SCOPE_UNCOMMITTED : SCOPE_ALL
+}
+
+/**
  * Resolve `start`'s review target: `--review-repo DIR` (or the
  * `DSH_OFFLOAD_REVIEW_REPO` default), `--review-base REV` defaulting to HEAD at
- * start time, and `--no-jev-review` forcing none. There is deliberately no
- * `--cwd` fallback: a job usually changes a separate clone.
+ * start time, and `--no-jev-review` forcing none. When the resolved repo is the
+ * job's own checkout the scope drops to `uncommitted` and one warning explains
+ * why. There is deliberately no `--cwd` fallback: a job usually changes a
+ * separate clone.
+ * @returns `{reviewRepo, reviewBase, reviewScope}`.
  */
-export function resolveStartReviewTarget({ flags, env, warn = () => {} }) {
-  if (flags['no-jev-review'] === true) return { reviewRepo: null, reviewBase: null }
+export function resolveStartReviewTarget({ flags, env, cwd, warn = () => {} }) {
+  if (flags['no-jev-review'] === true) return { reviewRepo: null, reviewBase: null, reviewScope: SCOPE_ALL }
   const dirArg = typeof flags['review-repo'] === 'string' ? flags['review-repo'] : envReviewRepo(env)
-  return resolveTarget(dirArg, flags['review-base'], warn)
+  const target = resolveTarget(dirArg, flags['review-base'], warn)
+  const reviewScope = reviewScopeFor(target.reviewRepo, cwd)
+  if (reviewScope === SCOPE_UNCOMMITTED) warn(SELF_CHECKOUT_WARNING)
+  return { ...target, reviewScope }
 }
 
 /**
  * Resolve `resume`'s review target. The resumed job copies the source record's
- * `reviewRepo`/`reviewBase` (the base stays the original start commit) unless
- * the resume passes its own `--review-repo`/`--review-base`; `--no-jev-review`
- * clears both.
+ * `reviewRepo`/`reviewBase`/`reviewScope` (the base stays the original start
+ * commit) unless the resume passes its own `--review-repo`/`--review-base`;
+ * `--no-jev-review` clears them.
+ * @returns `{reviewRepo, reviewBase, reviewScope}`.
  */
-export function resolveResumeReviewTarget({ flags, env, source, warn = () => {} }) {
-  if (flags['no-jev-review'] === true) return { reviewRepo: null, reviewBase: null }
+export function resolveResumeReviewTarget({ flags, env, source, cwd, warn = () => {} }) {
+  if (flags['no-jev-review'] === true) return { reviewRepo: null, reviewBase: null, reviewScope: SCOPE_ALL }
   const explicitRepo = typeof flags['review-repo'] === 'string' ? flags['review-repo'] : null
   const sourceRepo = source && typeof source.reviewRepo === 'string' ? source.reviewRepo : null
   if (explicitRepo === null && sourceRepo !== null) {
@@ -144,10 +171,14 @@ export function resolveResumeReviewTarget({ flags, env, source, warn = () => {} 
       if (resolved === null) warn(`cannot resolve ${flags['review-base']} in ${sourceRepo}; keeping ${reviewBase ?? 'no base'}`)
       else reviewBase = resolved
     }
-    return { reviewRepo: sourceRepo, reviewBase }
+    const inherited = source && source.reviewScope === SCOPE_UNCOMMITTED ? SCOPE_UNCOMMITTED : SCOPE_ALL
+    return { reviewRepo: sourceRepo, reviewBase, reviewScope: inherited }
   }
   const dirArg = explicitRepo !== null ? explicitRepo : envReviewRepo(env)
-  return resolveTarget(dirArg, flags['review-base'], warn)
+  const target = resolveTarget(dirArg, flags['review-base'], warn)
+  const reviewScope = reviewScopeFor(target.reviewRepo, cwd)
+  if (reviewScope === SCOPE_UNCOMMITTED) warn(SELF_CHECKOUT_WARNING)
+  return { ...target, reviewScope }
 }
 
 /** Reject `promise` after `ms` so a slow review is recorded as an error, not awaited forever. */
@@ -188,7 +219,11 @@ export async function runAutoReview(jobId, job, ctx) {
   let code
   try {
     code = await withTimeout(
-      runReview([jobId], { repo: job.reviewRepo, base: job.reviewBase }, reviewCtx),
+      runReview([jobId], {
+        repo: job.reviewRepo,
+        base: job.reviewBase,
+        scope: job.reviewScope === SCOPE_UNCOMMITTED ? SCOPE_UNCOMMITTED : SCOPE_ALL,
+      }, reviewCtx),
       ctx.timeoutMs ?? AUTO_REVIEW_TIMEOUT_MS,
     )
   } catch (error) {
