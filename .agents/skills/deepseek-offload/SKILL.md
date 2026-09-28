@@ -281,10 +281,15 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
 
-Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-config FILE`,
-`--prompt-file FILE` / `-f FILE` (for `start`), `--label NAME`, `--permission allow|reject`,
-`--allow-git-write`, `--read-only`, `--timeout-ms N`,
-`--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
+Every command accepts `--json`. Flags by command: `--cwd DIR` (start, resume, sessions),
+`--mcp-config FILE` (start, resume, mcp-servers), `--label NAME` and `--timeout-ms N`
+(start, resume; `wait` takes `--timeout-ms` too), `--read-only` / `--allow-git-write`
+(start, resume), `--session ID` (resume), `--prompt-file FILE` / `-f FILE`,
+`--permission allow|reject`, `--detach`, `--wait-session-ms N`, and `--defer-to-off-peak`
+(start only), `--all` (list, sync-workspace), `--dry-run` and `--wait-ms N`
+(sync-workspace), `--log` (status), and `--tz IANA_NAME` (window). Any other flag is
+rejected with `` unknown flag --X for `<command>` ``; the per-command list lives in
+`scripts/lib/cli-flags.mjs`.
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
 shows for it: an idle row under the project folder, never live progress. Jobs are detached: they keep running after the launching session ends.

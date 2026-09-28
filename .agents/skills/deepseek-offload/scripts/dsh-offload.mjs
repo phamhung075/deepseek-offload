@@ -2006,7 +2006,7 @@ function commandWindow(_positional, flags) {
 function usage() {
   process.stdout.write(`dsh-offload — background DeepSeek delegation through the MCP bridge
 
-  doctor                       verify bridge, DSH_HOME, acp model, MCP config and job store
+  doctor [--json]              verify bridge, DSH_HOME, acp model, MCP config and job store
   window [--tz IANA] [--json]  DeepSeek peak/off-peak status now, and when it next flips
   start "<prompt>" [flags]     launch a background job; prints job id + session id
                                  --prompt-file FILE, -f FILE   read the prompt from FILE
@@ -2039,8 +2039,8 @@ function usage() {
                                into its sandbox instead of the real remote
   wait   <jobId> [--timeout-ms N] [--json]
                                block until the job settles, then print the result
-  update <jobId> "<new info>"    steer a running job onto the right track
-  cancel <jobId>                stop a running job outright, no redirect
+  update <jobId> "<new info>" [--json]  steer a running job onto the right track
+  cancel <jobId> [--json]      stop a running job outright, no redirect
   list   [--all] [--json]      recent jobs
   sessions [--cwd DIR] [--json]     sessions in the shared DSH store (what the GUI shows)
   sync-workspace [--all] [--dry-run] [--wait-ms N] [--json]

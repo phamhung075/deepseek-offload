@@ -137,19 +137,24 @@ the project's `CLAUDE.md`/`AGENTS.md`, so the rule lives in the project's own in
 ```sh
 node "$R" doctor                        health check, including workspace grouping, resume
                                         support, and stale project entries
-node "$R" start "<prompt>" [--prompt-file FILE] [--cwd DIR] [--label NAME]
-                           [--mcp-config FILE] [--permission allow|reject]
-                           [--timeout-ms N] [--defer-to-off-peak] [--detach]
-                           [--json]
-node "$R" wait   <jobId>                print the header, then block until the job settles
+node "$R" start "<prompt>" [--prompt-file FILE] [-f FILE] [--cwd DIR]
+                           [--label NAME] [--mcp-config FILE]
+                           [--permission allow|reject] [--timeout-ms N]
+                           [--defer-to-off-peak] [--detach] [--read-only]
+                           [--allow-git-write] [--wait-session-ms N] [--json]
+node "$R" wait   <jobId> [--timeout-ms N] [--json]
+                                        print the header, then block until the job settles
 node "$R" update <jobId> "<new info>"   steer a running job
 node "$R" cancel <jobId>                stop it outright
 node "$R" resume <jobId> ["<extra>"]    continue an interrupted job's session in a new job
-                                        (--session ID --cwd DIR for a session with no job)
-node "$R" list   [--all]                recent jobs
-node "$R" sessions [--cwd DIR]          sessions in the shared DSH store
-node "$R" sync-workspace [--all]        file old sessions under their project folder
-node "$R" window                        DeepSeek peak/off-peak pricing window
+                                        (--session ID --cwd DIR for a session with no job;
+                                        also --label NAME --timeout-ms N --mcp-config FILE,
+                                        --read-only, --allow-git-write, --json)
+node "$R" list   [--all] [--json]       recent jobs
+node "$R" sessions [--cwd DIR] [--json] sessions in the shared DSH store
+node "$R" sync-workspace [--all] [--dry-run] [--wait-ms N] [--json]
+                                        file old sessions under their project folder
+node "$R" window [--tz IANA] [--json]   DeepSeek peak/off-peak pricing window
 ```
 
 Prompts must be self-contained: a job gets a fresh session that cannot see your conversation and
