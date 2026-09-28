@@ -24,6 +24,7 @@ import {
   writePrompt,
   scratch,
 } from './helpers/jev-worktree-fixture.mjs'
+import { buildGroups } from '../.agents/skills/deepseek-offload/scripts/jev/diff.mjs'
 
 /** A `--json` review report. */
 async function reviewJson(env, promptFile, repo, base) {
@@ -91,6 +92,27 @@ test('a committed hunk plus a staged change gives one commit group and one workt
   assert.deepEqual(worktree[0].hunks.map((hunk) => hunk.file), ['b.txt'])
   assert.equal(allHunkFiles(stub.requests).filter((file) => file === 'a.txt').length >= 1, true)
   assert.equal(report.groups.filter((group) => group.hunks.some((hunk) => hunk.file === 'a.txt')).length, 1)
+})
+
+test('a historical head builds only its commit groups, never the working tree', () => {
+  const root = scratch('historical-head')
+  const { repo, base, head: c1 } = makeRepo(root)
+  fs.writeFileSync(path.join(repo, 'c.txt'), 'charlie changed\n')
+  gitIn(repo, 'add', '-A')
+  gitIn(repo, 'commit', '-q', '-m', 'change c.txt')
+  const c2 = gitIn(repo, 'rev-parse', 'HEAD').stdout.trim()
+  // Uncommitted, so it belongs to HEAD's review but not to a historical range.
+  fs.writeFileSync(path.join(repo, 'b.txt'), 'bravo uncommitted\n')
+
+  const historical = buildGroups({ repo, base, head: c1 })
+  assert.deepEqual(historical.map((group) => [group.kind, group.sha]), [['commit', c1]])
+
+  const all = buildGroups({ repo, base })
+  assert.deepEqual(all.map((group) => [group.kind, group.sha]), [
+    ['commit', c1],
+    ['commit', c2],
+    ['worktree', 'worktree'],
+  ])
 })
 
 test('a low P(none) on the worktree group flags the review', async (t) => {

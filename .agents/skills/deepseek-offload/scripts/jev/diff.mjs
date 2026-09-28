@@ -179,8 +179,8 @@ export function untrackedHunk(repo, file) {
 /**
  * Collect the review groups: one per commit in `base..head` with at least one
  * hunk (unless `scope` is `uncommitted`), then the uncommitted tracked changes,
- * then the untracked files. The worktree group is diffed against `head`, so it
- * never repeats a commit already in range.
+ * then the untracked files. The worktree group is added only when `head` is
+ * `HEAD`, so a historical range never includes the working tree.
  * @returns `{kind, sha, subject, hunks}[]`; commits first, untracked last.
  */
 export function buildGroups({ repo, base, head = HEAD, scope = SCOPE_ALL }) {
@@ -192,8 +192,10 @@ export function buildGroups({ repo, base, head = HEAD, scope = SCOPE_ALL }) {
       groups.push({ kind: 'commit', sha, subject: commitSubject(repo, sha), hunks })
     }
   }
-  const worktree = worktreeGroup(repo, head)
-  if (worktree !== null) groups.push(worktree)
+  if (head === HEAD) {
+    const worktree = worktreeGroup(repo, head)
+    if (worktree !== null) groups.push(worktree)
+  }
   const untracked = untrackedFiles(repo).map((file) => untrackedHunk(repo, file)).filter(Boolean)
   if (untracked.length > 0) {
     groups.push({ kind: 'untracked', sha: UNTRACKED_SHA, subject: UNTRACKED_SUBJECT, hunks: untracked })
