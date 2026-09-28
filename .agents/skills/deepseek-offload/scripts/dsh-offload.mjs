@@ -1152,12 +1152,14 @@ async function commandStart(positional, flags) {
     warn: (message) => process.stderr.write(`dsh-offload: ${message}\n`),
   })
 
+  let jevLint = null
   if (flags['jev-lint'] === true || process.env.DSH_OFFLOAD_JEV_LINT === '1') {
     // Advisory only: the lint prints warnings and then the job starts anyway.
     // Dynamic import keeps the optional Jev modules out of every non-Jev run.
     // With --json the findings go to stderr so stdout stays one JSON document.
+    // The returned record is stored on the job and printed by result/wait.
     const { runStartLint } = await import('./jev/lint.mjs')
-    await runStartLint(prompt, {
+    jevLint = await runStartLint(prompt, {
       readOnly: flags['read-only'] === true,
       stdout: flags.json === true ? process.stderr : process.stdout,
     })
@@ -1203,6 +1205,9 @@ async function commandStart(positional, flags) {
     reviewRepo: review.reviewRepo,
     reviewBase: review.reviewBase,
     reviewScope: review.reviewScope,
+    // The advisory work-order lint's findings, when --jev-lint ran: shown by
+    // result/wait and status. Absent when the lint never ran.
+    ...(jevLint === null ? {} : { jevLint }),
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : DEFAULT_TIMEOUT_MS,
     sessionId: null,
     startedAt: now,
@@ -1408,6 +1413,7 @@ function commandStatus(positional, flags) {
     const reviewState = job.jevReview?.state ?? (workerAlive(job) ? 'running' : 'not run')
     process.stdout.write(`jev review  ${reviewState}\n`)
   }
+  if (job.jevLint) process.stdout.write(`jev lint  ${job.jevLint.state}\n`)
   if (job.state === 'running') {
     process.stdout.write(`progress  ${job.progressChars} chars streamed at last notification\n`)
     process.stdout.write('\nThe GUI lists this session but cannot show it running; follow it with:\n')
@@ -1463,6 +1469,7 @@ async function commandResult(positional, flags, { waitForReview = false } = {}) 
   if (flags.json === true) {
     const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, result: text }
     if (showReview && job.jevReview) payload.jevReview = job.jevReview
+    if (job.jevLint) payload.jevLint = job.jevLint
     print(payload, true)
     return jevExit ?? (job.state === 'error' ? 1 : 0)
   }
@@ -1471,6 +1478,13 @@ async function commandResult(positional, flags, { waitForReview = false } = {}) 
     return 2
   }
   process.stdout.write(`${describeJob(job)}\n\n--- result ---\n${text === '' ? '(no output captured)\n' : text}`)
+  // The stored lint prints before the review block, whether or not the job has
+  // a review clone; a job without a stored lint prints nothing new.
+  if (job.jevLint) {
+    const { renderLintBlock } = await import('./jev/lint.mjs')
+    const lintBlock = renderLintBlock(job.jevLint)
+    if (lintBlock !== null) process.stdout.write(`\n${lintBlock}\n`)
+  }
   if (showReview && auto !== null && job.jevReview) {
     const block = auto.renderJevBlock(job.jevReview, { jobsDir: JOBS_DIR, jobId })
     if (block !== null) process.stdout.write(`\n${block}\n`)

@@ -443,3 +443,98 @@ test('an empty diff still checks and shows the result text claims', async (t) =>
   assert.equal(job.jevReview.claimsConsidered, 1)
   assert.equal(job.jevReview.claimsUnsupported, 1)
 })
+
+// ---------------------------------------------------------------------------
+// Item 4: the stored lint record
+// ---------------------------------------------------------------------------
+
+const LINT_PROMPT = 'Change server-go/internal/auth/keycloak.go to reject an expired token, then report the result as JSON with a 200 word budget and one paragraph per finding.\n'
+
+test('start --jev-lint stores the findings on the job record', async (t) => {
+  const root = scratch('lint-store')
+  const stub = await startStub((parsed) => {
+    if (!parsed?.questions?.self_contained) return null
+    return {
+      payload: {
+        model: 'jev-test',
+        answers: {
+          single_outcome: { noul: 0.1 },
+          self_contained: { noul: 0.9 },
+          write_policy_stated: { noul: 0.1 },
+          is_investigation: { noul: 0.1 },
+        },
+        usage: {},
+      },
+    }
+  })
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+
+  const started = await run(['start', LINT_PROMPT, '--jev-lint', '--detach', '--json'], env, { cwd: root })
+  assert.equal(started.status, 0, started.stderr)
+  const job = JSON.parse(started.stdout)
+  const record = readJob(root, job.jobId)
+  assert.equal(record.jevLint.state, 'warn')
+  assert.ok(record.jevLint.warnings.some((finding) => finding.id === 'write_policy_stated'))
+  assert.ok(record.jevLint.warnings.every((finding) => typeof finding.text === 'string' && finding.text !== ''))
+  assert.ok(record.jevLint.info.some((finding) => finding.id === 'single_outcome'))
+  assert.equal(stub.requests.length, 1)
+  await run(['cancel', job.jobId], env, { cwd: root })
+})
+
+test('result, status and --json show the stored lint', async (t) => {
+  const root = scratch('lint-show')
+  const { repo } = makeCleanRepo(root)
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+  const jobId = 'job-lint-show'
+  const jobsDir = writeJob(root, {
+    jobId,
+    state: 'done',
+    prompt: 'x',
+    cwd: repo,
+    jevLint: {
+      state: 'warn',
+      warnings: [{ id: 'write_policy_stated', text: 'does not clearly state whether the worker may modify files (write_policy_stated=0.100)' }],
+      info: [{ id: 'single_outcome', text: 'may bundle several outcomes (single_outcome=0.100)' }],
+    },
+    startedAt: Date.now() - 5000,
+    finishedAt: Date.now() - 1000,
+  })
+  fs.writeFileSync(path.join(jobsDir, `${jobId}.result.md`), 'lint fixture\n')
+
+  const result = await run(['result', jobId], env, { cwd: root })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /lint: 1 warning\(s\)/)
+  assert.match(result.stdout, /write_policy_stated=0\.100/)
+  assert.match(result.stdout, /info: single_outcome/)
+
+  const status = await run(['status', jobId], env, { cwd: root })
+  assert.equal(status.status, 0, status.stderr)
+  assert.match(status.stdout, /jev lint  warn/)
+
+  const json = await run(['result', jobId, '--json'], env, { cwd: root })
+  assert.equal(json.status, 0, json.stderr)
+  assert.equal(JSON.parse(json.stdout).jevLint.state, 'warn')
+
+  writeJob(root, { jobId: 'job-no-lint', state: 'done', prompt: 'x', cwd: repo, startedAt: Date.now() - 5000, finishedAt: Date.now() - 1000 })
+  fs.writeFileSync(path.join(jobsDir, 'job-no-lint.result.md'), 'no lint fixture\n')
+  const plain = await run(['result', 'job-no-lint'], env, { cwd: root })
+  assert.equal(plain.status, 0, plain.stderr)
+  assert.doesNotMatch(plain.stdout, /lint:/, 'a job without a stored lint prints nothing')
+})
+
+test('start --jev-lint without a key stores disabled and never calls the stub', async (t) => {
+  const root = scratch('lint-nokey')
+  const stub = await startStub()
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url, { key: null })
+
+  const started = await run(['start', LINT_PROMPT, '--jev-lint', '--detach', '--json'], env, { cwd: root })
+  assert.equal(started.status, 0, started.stderr)
+  const job = JSON.parse(started.stdout)
+  assert.equal(readJob(root, job.jobId).jevLint.state, 'disabled')
+  assert.equal(stub.requests.length, 0, 'a disabled lint makes no request')
+  await run(['cancel', job.jobId], env, { cwd: root })
+})

@@ -24,6 +24,18 @@ export const MAX_WORDS = 1500
 /** A noul below this is on the bad side of a coin flip and is warned about. */
 export const BAD_SIDE = 0.5
 
+/** Stable ids for the deterministic code warnings, so `jevLint` can name them. */
+export const CODE_ID_SHORT = 'word-budget-short'
+export const CODE_ID_LONG = 'word-budget-long'
+export const CODE_ID_NO_PATH = 'no-path'
+export const CODE_ID_NO_OUTPUT = 'no-output-format'
+
+/** The states a stored `jevLint` record can carry. */
+export const LINT_OK = 'ok'
+export const LINT_WARN = 'warn'
+export const LINT_DISABLED = 'disabled'
+export const LINT_ERROR = 'error'
+
 /** Absolute (`/x/y`, `C:\x`) or repo-relative (`src/foo.mjs`) path. */
 const PATH_RE = /(?:^|\s)(?:[A-Za-z]:[\\/]|\/)[^\s]+|(?:^|\s)[\w.@-]+\/[\w.@/-]+/
 /** A phrase that pins the output contract: format, shape, or a budget. */
@@ -53,30 +65,33 @@ export function wordCount(text) {
 
 /**
  * Deterministic checks, cheapest first.
- * @returns warning lines; empty means the prompt passed every code check.
+ * @returns `{id, text}` warnings; empty means the prompt passed every code check.
  */
 export function runCodeChecks(prompt) {
   const warnings = []
   const words = wordCount(prompt)
-  if (words < MIN_WORDS) warnings.push(`short work order (${words} words): state the objective, scope, and output format`)
-  else if (words > MAX_WORDS) warnings.push(`long work order (${words} words): the worker pays for every line`)
-  if (!PATH_RE.test(prompt)) warnings.push('no absolute or repo-relative path: name the exact files or directories')
-  if (!OUTPUT_FORMAT_RE.test(prompt)) warnings.push('no output-format or word-budget phrase: say what the report must contain')
+  if (words < MIN_WORDS) warnings.push({ id: CODE_ID_SHORT, text: `short work order (${words} words): state the objective, scope, and output format` })
+  else if (words > MAX_WORDS) warnings.push({ id: CODE_ID_LONG, text: `long work order (${words} words): the worker pays for every line` })
+  if (!PATH_RE.test(prompt)) warnings.push({ id: CODE_ID_NO_PATH, text: 'no absolute or repo-relative path: name the exact files or directories' })
+  if (!OUTPUT_FORMAT_RE.test(prompt)) warnings.push({ id: CODE_ID_NO_OUTPUT, text: 'no output-format or word-budget phrase: say what the report must contain' })
   return warnings
 }
 
-/** Turn the four noul answers into warnings, information, and advice. */
+/**
+ * Turn the four noul answers into identified warnings, information, and advice.
+ * @returns `{warnings: [{id, text}], info: [{id, text}], advice: string[]}`.
+ */
 export function lintFindings(answers, { readOnly = false } = {}) {
   const warnings = []
   const info = []
   const advice = []
   for (const [id, message] of BAD_SIDE_QUESTIONS) {
     const value = answers?.[id]?.noul
-    if (typeof value === 'number' && value < BAD_SIDE) warnings.push(`${message} (${id}=${value.toFixed(3)})`)
+    if (typeof value === 'number' && value < BAD_SIDE) warnings.push({ id, text: `${message} (${id}=${value.toFixed(3)})` })
   }
   for (const [id, message] of INFO_QUESTIONS) {
     const value = answers?.[id]?.noul
-    if (typeof value === 'number' && value < BAD_SIDE) info.push(`${message} (${id}=${value.toFixed(3)})`)
+    if (typeof value === 'number' && value < BAD_SIDE) info.push({ id, text: `${message} (${id}=${value.toFixed(3)})` })
   }
   const investigation = answers?.is_investigation?.noul
   if (typeof investigation === 'number' && investigation >= BAD_SIDE && !readOnly) {
@@ -97,28 +112,54 @@ export async function lintPrompt(prompt, env = process.env) {
 /**
  * Run the lint for `start --jev-lint`: print findings, never throw, never block.
  * Called with the already-resolved prompt.
+ * @returns `{state, warnings: [{id, text}], info: [{id, text}]}` for the job
+ *   record; `state` is `ok`, `warn`, `disabled` or `error`.
  */
 export async function runStartLint(prompt, { readOnly = false, env = process.env, stdout = process.stdout, stderr = process.stderr } = {}) {
   if (!isEnabled(env)) {
     stdout.write(`${DISABLED_LINE}\n`)
-    return
+    return { state: LINT_DISABLED, warnings: [], info: [] }
   }
+  const codeWarnings = runCodeChecks(prompt)
   try {
-    const codeWarnings = runCodeChecks(prompt)
     const { answers } = await lintPrompt(prompt, env)
     const { warnings, info, advice } = lintFindings(answers, { readOnly })
     const all = [...codeWarnings, ...warnings]
     if (all.length === 0 && info.length === 0 && advice.length === 0) {
       stdout.write('jev lint (unvalidated advisory): no warnings\n')
-      return
+      return { state: LINT_OK, warnings: [], info: [] }
     }
     stdout.write('jev lint (unvalidated advisory — the start proceeds either way):\n')
-    for (const line of all) stdout.write(`  - ${line}\n`)
-    for (const line of info) stdout.write(`  i ${line}\n`)
+    for (const finding of all) stdout.write(`  - ${finding.text}\n`)
+    for (const finding of info) stdout.write(`  i ${finding.text}\n`)
     for (const line of advice) stdout.write(`  > ${line}\n`)
+    return { state: all.length > 0 ? LINT_WARN : LINT_OK, warnings: all, info }
   } catch (error) {
     stderr.write(`dsh-offload: jev lint skipped: ${error.message}\n`)
+    return { state: LINT_ERROR, warnings: codeWarnings, info: [] }
   }
+}
+
+/** The one line for info findings: their ids, on one line. */
+function infoLine(info) {
+  const ids = (Array.isArray(info) ? info : []).map((finding) => finding?.id).filter(Boolean)
+  return ids.length === 0 ? [] : [`  info: ${ids.join(', ')}`]
+}
+
+/**
+ * The `lint:` lines the result/wait block prints before the review lines, or
+ * null when there is no stored lint. Warnings each get a line; the info items
+ * are named by id on one line.
+ */
+export function renderLintBlock(jevLint) {
+  if (jevLint === null || jevLint === undefined) return null
+  const warnings = Array.isArray(jevLint.warnings) ? jevLint.warnings : []
+  if (jevLint.state === LINT_DISABLED) return 'lint: disabled'
+  if (jevLint.state === LINT_ERROR) {
+    return ['lint: error', ...warnings.map((finding) => `  - ${finding.text}`), ...infoLine(jevLint.info)].join('\n')
+  }
+  const header = warnings.length === 0 ? 'lint: ok' : `lint: ${warnings.length} warning(s)`
+  return [header, ...warnings.map((finding) => `  - ${finding.text}`), ...infoLine(jevLint.info)].join('\n')
 }
 
 /**
@@ -159,8 +200,8 @@ export async function runLint(positional, flags, ctx) {
     preScreen: true,
     promptFile,
     wordCount: wordCount(prompt),
-    warnings: allWarnings,
-    info,
+    warnings: allWarnings.map((finding) => finding.text),
+    info: info.map((finding) => finding.text),
     advice,
     answers,
     model,
@@ -178,11 +219,11 @@ export async function runLint(positional, flags, ctx) {
   }
   if (allWarnings.length > 0) {
     ctx.stdout.write('\nwarnings:\n')
-    for (const line of allWarnings) ctx.stdout.write(`  - ${line}\n`)
+    for (const finding of allWarnings) ctx.stdout.write(`  - ${finding.text}\n`)
   }
   if (info.length > 0) {
     ctx.stdout.write('\ninfo:\n')
-    for (const line of info) ctx.stdout.write(`  - ${line}\n`)
+    for (const finding of info) ctx.stdout.write(`  - ${finding.text}\n`)
   }
   if (advice.length > 0) {
     ctx.stdout.write('\nadvice:\n')
