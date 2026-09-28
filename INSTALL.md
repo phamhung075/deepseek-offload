@@ -133,7 +133,7 @@ facts a wrong install gets wrong. Then install:
 | `$DSH_HOME/profiles/acp/cordis.patch.yml` | Pins the delegation model **and** declares the provider's model catalog with that id, each inside managed `# deepseek-offload: … begin/end` fences. The catalog row is not decoration: a patch replaces the catalog, and an id it does not carry resolves as text-only, so image jobs would be refused with `does not declare image input`. |
 | `$DSH_HOME/plugins/dsh-workspace-attach/` | A **copy** of the plugin, so the GUI keeps working if the project moves or is deleted. |
 | `$DSH_HOME/profiles/web/cordis.patch.yml` | One fenced loader row pointing at that copy. |
-| `<project>/.agents/…` | Links to the bridge, the plugin, and the skill — its `SKILL.md`, both runner scripts, and its references. **A path the project already has is kept, never overwritten.** |
+| `<project>/.agents/…` | Links to the bridge, the plugin, and the skill — its `SKILL.md`, both runner scripts, its shared `scripts/lib/` helpers, and its references. **A path the project already has is kept, never overwritten.** |
 | `<project>/CLAUDE.md`, `<project>/AGENTS.md` | A managed `<!-- deepseek-offload: orchestrator rule — begin/end -->` block holding [`install/templates/orchestrator-rule.md`](install/templates/orchestrator-rule.md). Symlinks are resolved, so a `CLAUDE.md` → `AGENTS.md` link is written through once and the link is left in place; the block goes after the first H1 (the top when there is none), is replaced in place on later runs, and is removed by `--uninstall`. A file containing `THE DEEPSEEK HARNESS IS THE WORKER` without the fence is **kept** — it already carries a hand-written rule. `--no-agent-rule` skips the step; `--rule-file` overrides the candidates. |
 | `<project>/.mcp.json`, `<project>/.agents/mcp_config.json` | With `--with-mcp-config`: a managed `deepseek` entry. An existing `deepseek` entry that differs **is replaced** — if it was hand-written, copy it aside first and tell the human. |
 
@@ -315,81 +315,6 @@ To give a delegated job the calling client's own MCP tools:
 node "$R" mcp-servers --mcp-config "$PWD/.mcp.json"     # dry run: what would be forwarded
 node "$R" start "<task>" --mcp-config "$PWD/.mcp.json" --label <name>
 ```
-
-### Optional — TypeSafe Jev
-
-Jev is off unless a key is exported in the shell that runs the runner. When enabled it adds an
-advisory diff pre-screen, claim checking, a work-order lint, progress and failure triage, planning
-aids, and a local decision log. Jev never approves anything: it is a pre-screen, and the orchestrator
-still reviews every diff.
-
-**Key setup.** Set the key in the environment only — never in a job prompt or a config file:
-
-```sh
-export TYPESAFE_API_KEY=<key>        # or the workspace TYPESAFE_AI_API
-```
-
-**Environment variables.** All optional.
-
-| Variable | Default | Effect |
-| :--- | :--- | :--- |
-| `TYPESAFE_API_KEY` / `TYPESAFE_AI_API` | unset | Enable every jev command. Either key works; it is read per call and never printed, logged, or persisted. |
-| `TYPESAFE_API_URL` | `https://api.typesafe.ai/v1/systemone` | Endpoint override (the test suites point it at a local stub). |
-| `DSH_OFFLOAD_REVIEW_REPO` | unset | Default repo for `start`/`resume --review-repo` (auto-review when the job settles). |
-| `DSH_OFFLOAD_JEV_LINT` | unset | `1` runs the Jev lint on every `start`. |
-| `DSH_OFFLOAD_JEV_WATCH` | unset | `1` enables `wait --jev-watch`. |
-| `DSH_OFFLOAD_JEV_CONFIG` | `<projectRoot>/.agents/jev.json` | Hard-rules config path override. |
-| `DSH_OFFLOAD_JEV_ROLES` | `<projectRoot>/.agents/jev-roles.json` | Roles-file override for `jev route`. |
-| `DSH_OFFLOAD_SESSION_TAIL` | the sibling `session-tail.mjs` | Tailer `jev watch` / `jev triage` run. |
-
-**Config files.** Both optional; a missing file means the built-in defaults.
-
-`.agents/jev.json` — the code hard rules evaluated before any Jev call:
-
-```json
-{
-  "neverTouch": ["secrets/**", "*.pem"],
-  "pathScope": "warn",
-  "ignorePaths": ["generated/**"]
-}
-```
-
-`pathScope` is `off` | `warn` (default) | `flag`.
-
-`.agents/jev-roles.json` — roles for `jev route`:
-
-```json
-[
-  { "name": "Backend", "mission": "Services, APIs, storage" },
-  { "name": "Docs",    "mission": "README, guides, examples" }
-]
-```
-
-**What the installer wires.** `install.sh` links `scripts/jev/` (the modules the runner imports
-lazily) and `.agents/mcp-jev/server.cjs` (the worker self-check server `start --jev-mcp` mounts) into
-the project, exactly like the bridge and the skill. `install.sh --update` replaces those when they are
-stale links or copied scripts, like any other project entry. `doctor` has **no** separate Jev check and
-never looks at a key; its `project entries current` line covers the bridge, guard, runner, tailer, and
-the MCP bridge path, not the jev links.
-
-**Verify the disabled path** (no key needed, and it proves the links resolve):
-
-```sh
-R=.agents/skills/deepseek-offload/scripts/dsh-offload.mjs
-printf 'Explain the widget in src/widget.mjs. Output a 50-word report.\n' > /tmp/jev-check.md
-env -u TYPESAFE_API_KEY -u TYPESAFE_AI_API node "$R" jev lint --prompt-file /tmp/jev-check.md
-# jev: disabled — set TYPESAFE_API_KEY
-# exit 0
-```
-
-With no key, every jev command that calls the API prints that one line and exits 0, and no other
-command changes; the pure-local `jev decide`/`jev log` need no key, and `jev triage` still returns a
-code rule when the error text matches one. The
-planning aids `jev route`, `jev skills`, and `jev conflicts` only suggest; `start --review-repo <the
-clone the job changes>` runs the review automatically when the job settles, so `result`/`wait` print
-the look-here block; and `start --jev-mcp` mounts the self-check server. Details and exit codes are in
-[`.agents/skills/deepseek-offload/SKILL.md`](.agents/skills/deepseek-offload/SKILL.md) under "Jev
-judgments (optional)".
 
 ## Failure playbook
 

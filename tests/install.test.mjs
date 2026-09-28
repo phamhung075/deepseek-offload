@@ -163,13 +163,12 @@ test('the project gains the skill entry point and both scripts, not just their d
   assert.deepEqual(entries.map(({ link }) => link), [
     '.agents/mcp-deepseek/server.cjs',
     '.agents/mcp-deepseek/git-guard.cjs',
-    '.agents/mcp-jev/server.cjs',
     '.agents/dsh-workspace-attach',
     '.agents/skills/deepseek-offload/SKILL.md',
     '.agents/skills/deepseek-offload/scripts/dsh-offload.mjs',
     '.agents/skills/deepseek-offload/scripts/deepseek-offload.mjs',
     '.agents/skills/deepseek-offload/scripts/session-tail.mjs',
-    '.agents/skills/deepseek-offload/scripts/jev',
+    '.agents/skills/deepseek-offload/scripts/lib',
     '.agents/skills/deepseek-offload/references',
   ])
   for (const { target } of entries) assert.equal(existsSync(target), true, `the package ships ${target}`)

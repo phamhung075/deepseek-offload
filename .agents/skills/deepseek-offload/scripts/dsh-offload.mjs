@@ -44,6 +44,8 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolvePromptFile } from './lib/prompt-file.mjs'
+import { triageJob, renderTriageBlock } from './lib/triage.mjs'
 
 // ---------------------------------------------------------------------------
 // Paths and defaults
@@ -52,17 +54,6 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 // <repo>/.agents/skills/deepseek-offload/scripts -> <repo>/.agents
 const AGENTS_ROOT = path.resolve(SCRIPT_DIR, '..', '..', '..')
 const BRIDGE_SERVER = path.join(AGENTS_ROOT, 'mcp-deepseek', 'server.cjs')
-// The optional worker self-check MCP server `start --jev-mcp` mounts.
-const JEV_MCP_SERVER = path.join(AGENTS_ROOT, 'mcp-jev', 'server.cjs')
-// The one sentence `--jev-mcp` appends to the job's prompt.
-const JEV_MCP_PROMPT_SENTENCE =
-  'Before your final answer, you may call jev_check_claims on the file:line claims you make and jev_check_scope on your diff; fix or drop what they flag.'
-// The one stderr line each experimental Jev opt-in prints when it runs. The
-// standard loop is start --review-repo -> read the block -> jev decide; these
-// are deliberately outside it.
-const EXPERIMENTAL_PREFIX = 'experimental: '
-const JEV_MCP_EXPERIMENTAL = `${EXPERIMENTAL_PREFIX}UNVALIDATED worker self-check MCP loop`
-const JEV_WATCH_EXPERIMENTAL = `${EXPERIMENTAL_PREFIX}UNVALIDATED progress triage; may stop the wait early, leaving the job running`
 // The project the jobs belong to: the caller's directory. Job records and result
 // files live under it, so a project that vendors this repository keeps its own
 // job history.
@@ -103,6 +94,16 @@ function fail(message) {
   process.exit(1)
 }
 
+// Flags removed with the retired judgment integration. The parser keeps unknown
+// long flags silently, so an old command that still passes one must fail loudly
+// rather than run with the flag ignored.
+const REMOVED_FLAGS = ['review-repo', 'review-base', 'no-jev-review', 'jev-mcp', 'jev-lint', 'jev-watch', 'jev-exit']
+function failOnRemovedFlags(flags) {
+  for (const name of REMOVED_FLAGS) {
+    if (flags[name] !== undefined) fail(`--${name} was removed and is no longer supported`)
+  }
+}
+
 function isAbsolutePath(value) {
   return typeof value === 'string' && (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value))
 }
@@ -131,32 +132,6 @@ function writeJsonAtomic(file, value) {
   const tmp = `${file}.tmp-${process.pid}`
   fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`)
   fs.renameSync(tmp, file)
-}
-
-/** Read a client-shaped MCP config (`{mcpServers}` or a bare server map). */
-function readMcpServerMap(file) {
-  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
-  const map = parsed && typeof parsed === 'object' && parsed.mcpServers !== undefined ? parsed.mcpServers : parsed
-  if (map === null || typeof map !== 'object' || Array.isArray(map)) {
-    throw new Error(`${file} does not contain an MCP server map`)
-  }
-  return map
-}
-
-/**
- * Merge the jev self-check server into a job's MCP config and write the merged
- * config beside the job record. `--mcp-config` servers are included when given.
- * @returns the absolute merged config path.
- */
-function writeJevMcpConfig(jobId, mcpConfig) {
-  const servers = {}
-  if (typeof mcpConfig === 'string' && mcpConfig !== '' && fs.existsSync(mcpConfig)) {
-    Object.assign(servers, readMcpServerMap(mcpConfig))
-  }
-  servers.jev = { command: process.execPath, args: [JEV_MCP_SERVER] }
-  const merged = path.join(JOBS_DIR, `${jobId}.mcp.json`)
-  writeJsonAtomic(merged, { mcpServers: servers })
-  return merged
 }
 
 function readJob(jobId) {
@@ -881,41 +856,6 @@ function sendSocketRequest(sockPath, payload, timeoutMs = 10_000) {
 // ---------------------------------------------------------------------------
 // Worker: owns one background job
 // ---------------------------------------------------------------------------
-/**
- * Run the optional Jev pre-screen for a job that just settled. The job's own
- * final state is already on disk, so a review failure here changes neither the
- * state nor the worker's exit code; it only records `jevReview` on the job.
- * @param jobId - the settled job.
- */
-async function finalizeAutoReview(jobId) {
-  if (!fs.existsSync(jobFile(jobId))) return
-  try {
-    const job = readJob(jobId)
-    if (!job.reviewRepo || job.jevReview) return
-    const { runAutoReview } = await import('./jev/auto.mjs')
-    const jevReview = await runAutoReview(jobId, job, {
-      readJob,
-      jobsDir: JOBS_DIR,
-      writeJsonAtomic,
-      env: process.env,
-      projectRoot: PROJECT_ROOT,
-    })
-    updateJob(jobId, { jevReview })
-  } catch (error) {
-    try {
-      updateJob(jobId, {
-        jevReview: {
-          state: 'error',
-          error: error && error.message ? error.message : String(error),
-          finishedAt: Date.now(),
-        },
-      })
-    } catch {
-      /* the job file may be gone */
-    }
-  }
-}
-
 async function runWorker(jobId) {
   const job = readJob(jobId)
   const startedAt = job.startedAt
@@ -1013,7 +953,6 @@ async function runWorker(jobId) {
         elapsedMs: finishedAt - startedAt,
       })
       fs.writeFileSync(resultFile(jobId), `${message}\n`)
-      await finalizeAutoReview(jobId)
       return 1
     }
 
@@ -1032,7 +971,6 @@ async function runWorker(jobId) {
       elapsedMs: finishedAt - startedAt,
       resultFile: path.relative(PROJECT_ROOT, resultFile(jobId)),
     })
-    await finalizeAutoReview(jobId)
     return 0
   } catch (error) {
     const message = error && error.message ? error.message : String(error)
@@ -1041,7 +979,6 @@ async function runWorker(jobId) {
     } catch {
       /* the job file may be unreadable if it was deleted mid-run */
     }
-    await finalizeAutoReview(jobId)
     return 1
   } finally {
     if (updateServer !== undefined) {
@@ -1115,10 +1052,9 @@ function launchWorker(record) {
 }
 
 async function commandStart(positional, flags) {
+  failOnRemovedFlags(flags)
   ensureDirs()
-  const promptFile = typeof flags['prompt-file'] === 'string'
-    ? flags['prompt-file']
-    : typeof flags.f === 'string' ? flags.f : null
+  const promptFile = resolvePromptFile(flags)
   let prompt = positional.join(' ').trim()
   if (promptFile !== null) {
     if (!fs.existsSync(promptFile)) fail(`prompt file not found: ${promptFile}`)
@@ -1148,47 +1084,10 @@ async function commandStart(positional, flags) {
     mcpConfig = null
   }
 
-  // Auto-review target, resolved before the worker spawns so `reviewBase` is the
-  // commit the job starts from. A bad value warns and never blocks the start.
-  const { resolveStartReviewTarget } = await import('./jev/auto.mjs')
-  const review = resolveStartReviewTarget({
-    flags,
-    env: process.env,
-    cwd,
-    warn: (message) => process.stderr.write(`dsh-offload: ${message}\n`),
-  })
-
-  let jevLint = null
-  if (flags['jev-lint'] === true || process.env.DSH_OFFLOAD_JEV_LINT === '1') {
-    // Advisory only: the lint prints warnings and then the job starts anyway.
-    // Dynamic import keeps the optional Jev modules out of every non-Jev run.
-    // With --json the findings go to stderr so stdout stays one JSON document.
-    // The returned record is stored on the job and printed by result/wait.
-    const { runStartLint } = await import('./jev/lint.mjs')
-    jevLint = await runStartLint(prompt, {
-      readOnly: flags['read-only'] === true,
-      stdout: flags.json === true ? process.stderr : process.stdout,
-    })
-  }
-
   const now = Date.now()
   const deferredUntil = flags['defer-to-off-peak'] === true && isPeakAt(now) ? nextOffPeakStart(now) : null
 
   const jobId = newJobId()
-
-  // The optional worker self-check: mount .agents/mcp-jev beside any config the
-  // caller passed, and append the one prompt sentence that tells the worker the
-  // tools exist. The merged config lives in the jobs dir with the job record.
-  if (flags['jev-mcp'] === true) {
-    process.stderr.write(`${JEV_MCP_EXPERIMENTAL}\n`)
-    if (!fs.existsSync(JEV_MCP_SERVER)) fail(`--jev-mcp server not found: ${JEV_MCP_SERVER}`)
-    prompt = `${prompt}\n\n${JEV_MCP_PROMPT_SENTENCE}`
-    try {
-      mcpConfig = writeJevMcpConfig(jobId, mcpConfig)
-    } catch (error) {
-      fail(`--jev-mcp could not write the merged MCP config: ${error.message}`)
-    }
-  }
 
   const record = {
     jobId,
@@ -1204,17 +1103,6 @@ async function commandStart(positional, flags) {
     // Read-only is the whole point of an investigation job, so it is a flag the
     // runner enforces through the job's file policy, not a sentence in a prompt.
     readOnly: flags['read-only'] === true,
-    // The clone the job changes, and the commit it started from. Both are set
-    // only when `--review-repo` (or DSH_OFFLOAD_REVIEW_REPO) resolved; the
-    // worker reviews that clone's diff once the job settles. `reviewScope`
-    // drops to 'uncommitted' when that clone is the job's own checkout, so the
-    // orchestrator's commits in the range are never graded.
-    reviewRepo: review.reviewRepo,
-    reviewBase: review.reviewBase,
-    reviewScope: review.reviewScope,
-    // The advisory work-order lint's findings, when --jev-lint ran: shown by
-    // result/wait and status. Absent when the lint never ran.
-    ...(jevLint === null ? {} : { jevLint }),
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : DEFAULT_TIMEOUT_MS,
     sessionId: null,
     startedAt: now,
@@ -1292,6 +1180,7 @@ const RESUME_PROMPT = [
  * @returns process exit code.
  */
 async function commandResume(positional, flags) {
+  failOnRemovedFlags(flags)
   ensureDirs()
   if (!fs.existsSync(BRIDGE_SERVER)) fail(`bridge server not found: ${BRIDGE_SERVER}`)
   let source = null
@@ -1354,15 +1243,6 @@ async function commandResume(positional, flags) {
     mcpConfig = null
   }
 
-  const { resolveResumeReviewTarget } = await import('./jev/auto.mjs')
-  const review = resolveResumeReviewTarget({
-    flags,
-    env: process.env,
-    source,
-    cwd: base.cwd,
-    warn: (message) => process.stderr.write(`dsh-offload: ${message}\n`),
-  })
-
   const now = Date.now()
   const jobId = newJobId()
   const baseLabel = typeof flags.label === 'string' ? flags.label : base.label
@@ -1376,11 +1256,6 @@ async function commandResume(positional, flags) {
     permission: base.permission ?? DEFAULT_PERMISSION,
     allowGitWrite,
     readOnly,
-    // The resumed job reviews the same clone, against the original start commit,
-    // unless this resume named its own target.
-    reviewRepo: review.reviewRepo,
-    reviewBase: review.reviewBase,
-    reviewScope: review.reviewScope,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : (base.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     resumeOf: source === null ? null : source.jobId,
     resumeSessionId: sessionId,
@@ -1416,11 +1291,6 @@ function commandStatus(positional, flags) {
     return 0
   }
   process.stdout.write(`${describeJob(job)}\n`)
-  if (job.reviewRepo) {
-    const reviewState = job.jevReview?.state ?? (workerAlive(job) ? 'running' : 'not run')
-    process.stdout.write(`jev review  ${reviewState}\n`)
-  }
-  if (job.jevLint) process.stdout.write(`jev lint  ${job.jevLint.state}\n`)
   if (job.state === 'running') {
     process.stdout.write(`progress  ${job.progressChars} chars streamed at last notification\n`)
     process.stdout.write('\nThe GUI lists this session but cannot show it running; follow it with:\n')
@@ -1433,86 +1303,39 @@ function commandStatus(positional, flags) {
 }
 
 /**
- * Print a job's final result, plus its Jev pre-screen block when the job has a
- * review clone. `--jev-exit` turns a flagged review into exit 3; every other
- * exit code is unchanged.
+ * Print a job's final result. A failed job also gets the deterministic failure
+ * triage appended; it never changes the result.
  * @param positional - `[jobId]`.
- * @param flags - `--json`, `--jev-exit`, `--no-jev-review`.
- * @param options - `waitForReview` makes a settled job wait for the worker's
- *   in-flight review instead of reporting it as still running.
+ * @param flags - `--json`.
  * @returns process exit code.
  */
-async function commandResult(positional, flags, { waitForReview = false } = {}) {
+async function commandResult(positional, flags) {
+  failOnRemovedFlags(flags)
   ensureDirs()
   const jobId = positional[0]
   if (jobId === undefined) fail('result requires a job id')
-  let job = reconcileJob(readJob(jobId))
+  const job = reconcileJob(readJob(jobId))
   const file = resultFile(jobId)
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
-  // The block only applies once the job has settled; while it is active the
-  // existing "still running" output stands. `--no-jev-review` suppresses both
-  // the text block and the JSON field.
-  const showReview = job.reviewRepo !== undefined && job.reviewRepo !== null
-    && flags['no-jev-review'] !== true && !isActiveState(job.state)
-  let auto = null
-  if (showReview) {
-    try {
-      auto = await import('./jev/auto.mjs')
-      job = await auto.ensureJevReview(jobId, job, {
-        wait: waitForReview,
-        workerAlive,
-        updateJob,
-        readJob,
-        jobsDir: JOBS_DIR,
-        writeJsonAtomic,
-        env: process.env,
-        projectRoot: PROJECT_ROOT,
-      })
-    } catch {
-      auto = null
-    }
-  }
-  const jevExit = flags['jev-exit'] === true && job.jevReview?.state === 'flagged' ? 3 : null
   if (flags.json === true) {
     const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, result: text }
-    if (showReview && job.jevReview) payload.jevReview = job.jevReview
-    if (job.jevLint) payload.jevLint = job.jevLint
     print(payload, true)
-    return jevExit ?? (job.state === 'error' ? 1 : 0)
+    return job.state === 'error' ? 1 : 0
   }
   if (isActiveState(job.state)) {
     process.stdout.write(`job ${jobId} is still ${job.state}; no result yet.\n${describeJob(job)}\n`)
     return 2
   }
   process.stdout.write(`${describeJob(job)}\n\n--- result ---\n${text === '' ? '(no output captured)\n' : text}`)
-  // The stored lint prints before the review block, whether or not the job has
-  // a review clone; a job without a stored lint prints nothing new.
-  if (job.jevLint) {
-    const { renderLintBlock } = await import('./jev/lint.mjs')
-    const lintBlock = renderLintBlock(job.jevLint)
-    if (lintBlock !== null) process.stdout.write(`\n${lintBlock}\n`)
-  }
-  if (showReview && auto !== null && job.jevReview) {
-    const block = auto.renderJevBlock(job.jevReview, { jobsDir: JOBS_DIR, jobId })
-    if (block !== null) process.stdout.write(`\n${block}\n`)
-  }
-  // A failed job gets the failure triage: code rules first, one UNVALIDATED Jev
-  // choice only if no rule matched. It never resumes anything.
   if (job.state === 'error') {
     try {
-      const { triageJob, renderTriageBlock } = await import('./jev/triage.mjs')
-      const triage = await triageJob(jobId, job, {
-        env: process.env,
-        projectRoot: PROJECT_ROOT,
-        sessionTail: process.env.DSH_OFFLOAD_SESSION_TAIL || SESSION_TAIL,
-        stderr: process.stderr,
-      })
+      const triage = triageJob(jobId, job, { env: process.env })
       if (triage !== null) process.stdout.write(`\n${renderTriageBlock(jobId, triage)}\n`)
     } catch {
       /* triage is advisory; it never changes the result */
     }
   }
-  return jevExit ?? (job.state === 'error' ? 1 : 0)
+  return job.state === 'error' ? 1 : 0
 }
 
 /**
@@ -1713,6 +1536,7 @@ async function commandCancel(positional, flags) {
 }
 
 async function commandWait(positional, flags) {
+  failOnRemovedFlags(flags)
   ensureDirs()
   const jobId = positional[0]
   if (jobId === undefined) fail('wait requires a job id')
@@ -1726,46 +1550,12 @@ async function commandWait(positional, flags) {
   const human = flags.json !== true
   if (human) process.stdout.write(`${describeJob(job, { full: true })}\n\nwaiting   for the job to settle; Ctrl-C stops waiting, not the job\n`)
 
-  // Optional early-return watch: while waiting, reuse the `jev watch` triage so
-  // a confident looping/blocked/off-task verdict stops the wait (exit 4) and
-  // the job keeps running. Jev is optional, so no key means no watcher.
-  const jevWatch = flags['jev-watch'] === true || process.env.DSH_OFFLOAD_JEV_WATCH === '1'
-  if (jevWatch) process.stderr.write(`${JEV_WATCH_EXPERIMENTAL}\n`)
-  let watcher = null
-  if (jevWatch) {
-    try {
-      const { isEnabled, DISABLED_LINE } = await import('./jev/client.mjs')
-      if (!isEnabled(process.env)) {
-        process.stdout.write(`${DISABLED_LINE}\n`)
-      } else {
-        const { createWaitWatcher } = await import('./jev/watch.mjs')
-        const parsed = Number(typeof flags['watch-interval-ms'] === 'string' ? flags['watch-interval-ms'] : 120000)
-        watcher = createWaitWatcher({
-          jobId,
-          intervalMs: Number.isFinite(parsed) && parsed >= 0 ? parsed : 120000,
-          env: process.env,
-          projectRoot: PROJECT_ROOT,
-          sessionTail: process.env.DSH_OFFLOAD_SESSION_TAIL || SESSION_TAIL,
-        })
-      }
-    } catch {
-      watcher = null
-    }
-  }
-
   let lastState = job.state
   let lastLine = Date.now()
   while (isActiveState(job.state)) {
     if (Date.now() > deadline) {
       process.stderr.write(`dsh-offload: wait timed out after ${timeoutMs}ms; job ${jobId} is still running.\n`)
       return 2
-    }
-    if (watcher !== null && watcher.due()) {
-      const problem = await watcher.probe(job)
-      if (problem !== null) {
-        process.stdout.write(`${problem}\n`)
-        return 4
-      }
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000))
     job = reconcileJob(readJob(jobId))
@@ -1782,9 +1572,7 @@ async function commandWait(positional, flags) {
     }
   }
   if (human) process.stdout.write('\n')
-  // The worker writes its final state before it reviews, so wait for the
-  // in-flight review rather than reporting it as still running.
-  return commandResult([jobId], flags, { waitForReview: true })
+  return commandResult([jobId], flags)
 }
 
 function commandList(positional, flags) {
@@ -2285,23 +2073,6 @@ function usage() {
                                    so it cannot modify a file at all (default:
                                    workspace-write, mutations inside the workspace)
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
-                                 --review-repo DIR  review the diff DIR receives once
-                                   the job settles (DIR must be a git work tree; the
-                                   toplevel is stored). Commits in the base..HEAD
-                                   range, the uncommitted tracked changes, and the
-                                   untracked files are all reviewed; point it at the
-                                   clone the job changes. When DIR is the job's own
-                                   --cwd checkout, only uncommitted + untracked are
-                                   reviewed (a warning says to use a clone for commit
-                                   review). Also enabled by DSH_OFFLOAD_REVIEW_REPO=DIR;
-                                   --no-jev-review disables it for this job.
-                                 --review-base REV  the revision the review diffs from
-                                   (default: HEAD at start time)
-                                 --jev-lint  run the advisory Jev work-order lint
-                                   before dispatch and print its warnings; the
-                                   findings are stored on the job and shown by
-                                   result/wait and status; never blocks the start;
-                                   also enabled by DSH_OFFLOAD_JEV_LINT=1
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
   resume <jobId> ["<extra>"]   continue an interrupted job's session in a new job
@@ -2309,19 +2080,13 @@ function usage() {
                                  the workspace first). --session ID --cwd DIR resumes
                                  a session with no job record; --label --timeout-ms
                                  --read-only --allow-git-write --mcp-config --json
-                                 --review-repo --review-base --no-jev-review copy or
-                                 override the source job's auto-review target
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
-  result <jobId> [--json] [--jev-exit] [--no-jev-review]
-                               final report text, then the stored lint (when the
-                               job ran --jev-lint) and the Jev pre-screen block
-                               when the job has a review clone; --jev-exit exits 3
-                               when the review flagged
+  result <jobId> [--json]      final report text, plus the deterministic failure
+                               triage when the job ended in error
   guard  <jobId> [--json]      git write guard state, and any refs the job pushed
                                into its sandbox instead of the real remote
-  wait   <jobId> [--timeout-ms N] [--json] [--jev-exit] [--no-jev-review]
+  wait   <jobId> [--timeout-ms N] [--json]
                                block until the job settles, then print the result
-                               (waits for an in-flight review up to 180000 ms)
   update <jobId> "<new info>"    steer a running job onto the right track
   cancel <jobId>                stop a running job outright, no redirect
   list   [--all] [--json]      recent jobs
@@ -2332,61 +2097,6 @@ function usage() {
                                landed in the GUI's Ungrouped bucket when
                                --all covers every session in the store)
   mcp-servers [--mcp-config FILE] [--json]   which MCP servers a job would receive
-  jev review <jobId> --repo DIR --base REV [--head REV] [--json]
-  jev review --prompt-file F --repo DIR --base REV [--head REV] [--json]
-                               optional TypeSafe Jev pre-screen of a job's diff
-                               against its work order; exit 3 when flagged, 0 when
-                               clean, and writes <jobId>.jev-review.json
-  jev lint --prompt-file F [--read-only] [--json]
-                               brief, UNVALIDATED work-order check (advisory;
-                               exit 0, or 1 on a missing prompt file or API
-                               failure)
-  jev watch <jobId> [--interval-ms N] [--timeout-ms N]
-                               UNVALIDATED progress triage; exit 4 on a
-                               looping/blocked/off-task verdict, run it with
-                               run_in_background: true
-  jev claims <jobId> --repo DIR [--rev REV] [--json]
-                               check the report's path:line claims against ±6
-                               lines at REV (default HEAD); threshold 0.3;
-                               never flags the diff review
-  jev decide <jobId> accept|reject|partial [--note TEXT] [--json]
-                               record a label and append it to jev-log.jsonl
-  jev log [--json]             decision counts, flagged/clean agreement, and a
-                               P(none) what-if at 0.4/0.5/0.6
-  # -- Experimental (opt-in, not part of the standard loop) --
-  # The standard loop is: start --review-repo DIR -> read the result block ->
-  # jev decide. Everything under this heading is opt-in and prints one
-  # "experimental:" line when it runs.
-  start --jev-mcp              mount the Jev self-check MCP server
-                               (.agents/mcp-jev/server.cjs) and append its
-                               one-sentence prompt hint; when --mcp-config is
-                               also given its servers are merged in. UNVALIDATED
-                               loop; no key makes the tools say "Jev disabled"
-  wait --jev-watch             UNVALIDATED early return: reuse the jev watch
-                               triage every --watch-interval-ms (default 120000,
-                               env DSH_OFFLOAD_JEV_WATCH=1) and exit 4 on a
-                               confident looping/blocked/off-task verdict,
-                               leaving the job running
-  jev triage <jobId> [--json]  failure triage: the code rules are standard; the
-                               Jev failure_kind fallback is UNVALIDATED. Never
-                               auto-resumes.
-  jev route --prompt-file F [--roles-file R] [--json]
-                               rank roles the work order fits (measured 2026-09-27:
-                               40.9% top-1 / 54.5% top-2), advise background vs
-                               blocking and --defer-to-off-peak. Roles default to
-                               <projectRoot>/.agents/jev-roles.json
-                               (DSH_OFFLOAD_JEV_ROLES overrides).
-  jev skills --prompt-file F [--skills-dir D] [--json]
-                               UNVALIDATED suggestion of which project skill to
-                               attach; two requests (rank every name, then
-                               re-read the top 3 with their SKILL.md openings).
-                               Skills default to <projectRoot>/.agents/skills.
-  jev conflicts <jobId> <jobId> [...] [--json]
-                               pairs findings from different jobs that share a
-                               file path and asks whether they contradict each
-                               other (measured on SYNTHETIC pairs only, AUC 0.997).
-                               Suggestions only — the orchestrator still reviews
-                               every diff.
 
 Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              DEEPSEEK_MCP_TIMEOUT_MS, DEEPSEEK_MCP_CONFIG, DEEPSEEK_MCP_SKIP,
@@ -2396,14 +2106,7 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              --read-only sets it),
              DEEPSEEK_WORKSPACE_ATTACH (=0 to stop asking the GUI to group jobs),
              DEEPSEEK_WORKSPACE_ATTACH_DIR, DEEPSEEK_WORKSPACE_ATTACH_WAIT_MS,
-             DSH_OFFLOAD_JOB_DIR, DSH_GUI_URL,
-             TYPESAFE_API_KEY | TYPESAFE_AI_API (enable Jev; never printed),
-             TYPESAFE_API_URL (override the Jev endpoint),
-             DSH_OFFLOAD_REVIEW_REPO (start/resume default for --review-repo),
-             DSH_OFFLOAD_JEV_LINT (=1 to run the Jev lint on every start),
-             DSH_OFFLOAD_JEV_WATCH (=1 to enable wait --jev-watch),
-             DSH_OFFLOAD_JEV_CONFIG (override <projectRoot>/.agents/jev.json),
-             DSH_OFFLOAD_SESSION_TAIL (override the tailer jev watch runs)
+             DSH_OFFLOAD_JOB_DIR, DSH_GUI_URL
 `)
 }
 
@@ -2474,24 +2177,6 @@ async function main() {
     case 'window':
       process.exitCode = commandWindow(positional, flags)
       return
-    case 'jev': {
-      // Optional TypeSafe Jev judgments. The job-store helpers are passed in,
-      // so the jev modules never duplicate the runner's paths.
-      const { runJevCli } = await import('./jev/cli.mjs')
-      process.exitCode = await runJevCli(positional, flags, {
-        readJob,
-        loadJob: (jobId) => reconcileJob(readJob(jobId)),
-        isActive: isActiveState,
-        jobsDir: JOBS_DIR,
-        writeJsonAtomic,
-        projectRoot: PROJECT_ROOT,
-        sessionTail: process.env.DSH_OFFLOAD_SESSION_TAIL || SESSION_TAIL,
-        env: process.env,
-        stdout: process.stdout,
-        stderr: process.stderr,
-      })
-      return
-    }
     case undefined:
     case 'help':
     case '--help':
