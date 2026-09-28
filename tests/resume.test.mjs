@@ -151,6 +151,19 @@ test('resume refuses a job whose worker is still alive', () => {
   assert.match(out.stderr, /still running/)
 })
 
+test('list ignores sidecar files stored next to a job record', () => {
+  const fx = fixture('sidecar')
+  const job = interruptedJob(fx)
+  fs.writeFileSync(path.join(fx.jobs, 'jobs', `${job.jobId}.extra-sidecar.json`), '{}')
+
+  const out = run(fx, ['list'])
+  assert.equal(out.status, 0, out.stderr)
+  const lines = out.stdout.trim().split('\n')
+  assert.equal(lines.length, 2, 'a header plus exactly one job row')
+  assert.match(out.stdout, new RegExp(job.jobId))
+  assert.equal(out.stdout.includes('extra-sidecar'), false)
+})
+
 test('doctor reports resume support from the bridge probe and flags a stale project bridge', () => {
   const fx = fixture('doctor')
   // The stub answers ACP initialize without capabilities, like a Harness that predates resume.

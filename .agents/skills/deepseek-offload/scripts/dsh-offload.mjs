@@ -183,9 +183,12 @@ function listJobIds() {
     .readdirSync(JOBS_DIR)
     .filter((name) => name.endsWith('.json'))
     .map((name) => name.slice(0, -'.json'.length))
+    .filter((id) => JOB_ID_RE.test(id))
     .sort()
     .reverse()
 }
+
+const JOB_ID_RE = /^job-\d{8}-\d{6}-[0-9a-f]{4}$/
 
 function newJobId() {
   const now = new Date()
