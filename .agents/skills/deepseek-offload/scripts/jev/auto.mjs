@@ -233,26 +233,16 @@ export async function runAutoReview(jobId, job, ctx) {
   if (code !== EXIT_CLEAN && code !== EXIT_FLAGGED) {
     return { state: 'error', error: firstLine(captured.text) || `jev review exited ${code}`, finishedAt: Date.now() }
   }
-  if (captured.text.includes(NO_CHANGES_MARKER)) return { state: 'empty', finishedAt: Date.now() }
+
+  // Claims are independent of the diff verdict and of whether the diff was
+  // empty: a job that only reports (no changes to judge) can still cite code.
+  if (captured.text.includes(NO_CHANGES_MARKER)) {
+    return { state: 'empty', ...(await evaluateClaims(jobId, job, ctx)), finishedAt: Date.now() }
+  }
 
   const report = readReport(ctx.jobsDir, jobId)
-  if (report === null) return { state: 'empty', finishedAt: Date.now() }
-
-  // Claims are a separate signal: they never change the diff verdict, only
-  // `claimsFlagged`. They run only when the result text actually cites code.
-  let claimsFlagged = false
-  let claimsConsidered = 0
-  let claimsUnsupported = 0
-  try {
-    const text = readResultText(jobId, job, ctx)
-    if (text !== '' && extractClaims(text).length > 0) {
-      const claims = await runClaims(jobId, job, ctx, { repo: job.reviewRepo })
-      claimsFlagged = claims.claimsFlagged === true
-      claimsConsidered = claims.considered ?? 0
-      claimsUnsupported = claims.unsupportedCount ?? 0
-    }
-  } catch {
-    /* claims are advisory; a failure never changes the review */
+  if (report === null) {
+    return { state: 'empty', ...(await evaluateClaims(jobId, job, ctx)), finishedAt: Date.now() }
   }
 
   return {
@@ -261,12 +251,42 @@ export async function runAutoReview(jobId, job, ctx) {
     groups: Array.isArray(report.groups) ? report.groups.length : 0,
     meanInScope: typeof report.meanInScope === 'number' ? report.meanInScope : null,
     ruleHits: typeof report.ruleHits === 'number' ? report.ruleHits : 0,
-    claimsFlagged,
-    claimsConsidered,
-    claimsUnsupported,
+    ...(await evaluateClaims(jobId, job, ctx)),
     reportFile: storedReportPath(ctx.projectRoot, ctx.jobsDir, jobId),
     finishedAt: Date.now(),
   }
+}
+
+/**
+ * Run the claim check when the job's result text cites code, whether the diff
+ * was empty or not. Claims are a separate signal: they never change the diff
+ * verdict, only `claimsFlagged`; a failure is swallowed because they are
+ * advisory.
+ * @returns `{claimsFlagged, claimsConsidered, claimsUnsupported}`.
+ */
+async function evaluateClaims(jobId, job, ctx) {
+  try {
+    const text = readResultText(jobId, job, ctx)
+    if (text !== '' && extractClaims(text).length > 0) {
+      const claims = await runClaims(jobId, job, ctx, { repo: job.reviewRepo })
+      // Store the report the block lists from, exactly like `jev claims` does.
+      if (typeof ctx.writeJsonAtomic === 'function' && typeof ctx.jobsDir === 'string') {
+        try {
+          ctx.writeJsonAtomic(path.join(ctx.jobsDir, `${jobId}.jev-claims.json`), claims)
+        } catch {
+          /* the counts below still reach the block header */
+        }
+      }
+      return {
+        claimsFlagged: claims.claimsFlagged === true,
+        claimsConsidered: claims.considered ?? 0,
+        claimsUnsupported: claims.unsupportedCount ?? 0,
+      }
+    }
+  } catch {
+    /* claims are advisory; a failure never changes the review */
+  }
+  return { claimsFlagged: false, claimsConsidered: 0, claimsUnsupported: 0 }
 }
 
 /**
@@ -323,7 +343,11 @@ export function renderJevBlock(jevReview, { jobsDir, jobId }) {
   if (jevReview === null || jevReview === undefined) return null
   if (jevReview.state === 'disabled') return REVIEW_DISABLED_LINE
   if (jevReview.state === 'running') return REVIEW_RUNNING_LINE
-  if (jevReview.state === 'empty') return 'jev review: no changes in the review range'
+  if (jevReview.state === 'empty') {
+    // An empty diff is not an empty report: a job can cite code while its diff
+    // holds no changes, so the claims list still shows here.
+    return ['jev review: no changes in the review range', ...claimsLines(jevReview, { jobsDir, jobId })].join('\n')
+  }
   if (jevReview.state === 'error') return `jev review: error — ${jevReview.error ?? 'unknown error'}`
 
   const report = readReport(jobsDir, jobId)
@@ -356,14 +380,24 @@ export function renderJevBlock(jevReview, { jobsDir, jobId }) {
     }
   }
   if (jevReview.claimsFlagged === true) {
-    const claims = readClaimsReport(jobsDir, jobId)
-    const unsupported = claims?.unsupported ?? []
-    lines.push(`claims to verify (${unsupported.length}/${claims?.considered ?? 0} unsupported; not a diff verdict):`)
-    for (const claim of unsupported) {
-      const sentence = String(claim.sentence ?? '').replace(/\s+/g, ' ').slice(0, 120)
-      lines.push(`  ${claim.path}:${claim.line}  supported=${probability(claim.supported)}  ${sentence}`)
-    }
+    lines.push(...claimsLines(jevReview, { jobsDir, jobId }))
   }
   lines.push(`report: ${jevReview.reportFile ?? reportFile(jobsDir, jobId)}`)
   return lines.join('\n')
+}
+
+/**
+ * The "claims to verify" lines for a stored claim report, or an empty list when
+ * nothing was flagged. Shared by the normal block and the empty-diff block.
+ */
+function claimsLines(jevReview, { jobsDir, jobId }) {
+  if (jevReview.claimsFlagged !== true) return []
+  const claims = readClaimsReport(jobsDir, jobId)
+  const unsupported = claims?.unsupported ?? []
+  const lines = [`claims to verify (${unsupported.length}/${claims?.considered ?? 0} unsupported; not a diff verdict):`]
+  for (const claim of unsupported) {
+    const sentence = String(claim.sentence ?? '').replace(/\s+/g, ' ').slice(0, 120)
+    lines.push(`  ${claim.path}:${claim.line}  supported=${probability(claim.supported)}  ${sentence}`)
+  }
+  return lines
 }

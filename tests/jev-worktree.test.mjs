@@ -402,3 +402,44 @@ test('reviewScope uncommitted skips a job-time commit but reviews the uncommitte
   assert.deepEqual(report.groups[0].hunks.map((hunk) => hunk.file), ['b.txt'])
   assert.ok(!allHunkFiles(stub.requests).includes('c.txt'), 'the orchestrator commit is not reviewed')
 })
+
+// ---------------------------------------------------------------------------
+// Item 3: claims on an empty diff
+// ---------------------------------------------------------------------------
+
+test('an empty diff still checks and shows the result text claims', async (t) => {
+  const root = scratch('empty-claims')
+  const { repo, base } = makeCleanRepo(root)
+  const stub = await startStub((parsed) => {
+    if (!parsed?.questions?.supported) return null
+    return { payload: { model: 'jev-test', answers: { supported: { noul: 0.1 } }, usage: {} } }
+  })
+  t.after(() => stub.close())
+  const env = baseEnv(root, stub.url)
+  const jobId = 'job-empty-claims'
+  const jobsDir = writeJob(root, {
+    jobId,
+    state: 'done',
+    prompt: 'report only',
+    cwd: repo,
+    reviewRepo: repo,
+    reviewBase: base,
+    reviewScope: 'all',
+    startedAt: Date.now() - 5000,
+    finishedAt: Date.now() - 1000,
+  })
+  fs.writeFileSync(path.join(jobsDir, `${jobId}.result.md`), 'The file a.txt:1 holds the alpha value.\n')
+
+  const out = await run(['result', jobId], env, { cwd: root })
+  assert.equal(out.status, 0, out.stderr)
+  assert.match(out.stdout, /no changes in the review range/)
+  assert.match(out.stdout, /claims to verify \(1\/1 unsupported/)
+  assert.match(out.stdout, /a\.txt:1\s+supported=0\.100/)
+  const claimRequests = stub.requests.filter((body) => body?.questions?.supported)
+  assert.equal(claimRequests.length, 1, 'exactly one claims request reached the stub')
+  const job = readJob(root, jobId)
+  assert.equal(job.jevReview.state, 'empty')
+  assert.equal(job.jevReview.claimsFlagged, true)
+  assert.equal(job.jevReview.claimsConsidered, 1)
+  assert.equal(job.jevReview.claimsUnsupported, 1)
+})
