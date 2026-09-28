@@ -44,6 +44,7 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
 import { resolvePromptFile } from './lib/prompt-file.mjs'
 import { triageJob, renderTriageBlock } from './lib/triage.mjs'
 
@@ -92,16 +93,6 @@ const POLL_INTERVAL_MS = 3_000
 function fail(message) {
   process.stderr.write(`dsh-offload: ${message}\n`)
   process.exit(1)
-}
-
-// Flags removed with the retired judgment integration. The parser keeps unknown
-// long flags silently, so an old command that still passes one must fail loudly
-// rather than run with the flag ignored.
-const REMOVED_FLAGS = ['review-repo', 'review-base', 'no-jev-review', 'jev-mcp', 'jev-lint', 'jev-watch', 'jev-exit']
-function failOnRemovedFlags(flags) {
-  for (const name of REMOVED_FLAGS) {
-    if (flags[name] !== undefined) fail(`--${name} was removed and is no longer supported`)
-  }
 }
 
 function isAbsolutePath(value) {
@@ -283,44 +274,6 @@ function formatLocal(ms, tz) {
 
 function print(value, asJson) {
   if (asJson) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
-}
-
-// ---------------------------------------------------------------------------
-// Argument parsing
-// ---------------------------------------------------------------------------
-function parseArgs(argv) {
-  const positional = []
-  const flags = {}
-  // Short flags stay separate from long ones: `-f` is stored as `f` (never
-  // merged with the long form), and a lone `-` is kept as a positional token
-  // because it is the stdin sentinel, not a flag.
-  for (let i = 0; i < argv.length; i++) {
-    const token = argv[i]
-    if (token.startsWith('--')) {
-      const [name, inline] = token.slice(2).split('=')
-      if (inline !== undefined) {
-        flags[name] = inline
-      } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
-        flags[name] = argv[i + 1]
-        i++
-      } else {
-        flags[name] = true
-      }
-    } else if (token.startsWith('-') && token !== '-') {
-      const [name, inline] = token.slice(1).split('=')
-      if (inline !== undefined) {
-        flags[name] = inline
-      } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('-')) {
-        flags[name] = argv[i + 1]
-        i++
-      } else {
-        flags[name] = true
-      }
-    } else {
-      positional.push(token)
-    }
-  }
-  return { positional, flags }
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,7 +1008,6 @@ function launchWorker(record) {
 }
 
 async function commandStart(positional, flags) {
-  failOnRemovedFlags(flags)
   ensureDirs()
   const promptFile = resolvePromptFile(flags)
   let prompt = positional.join(' ').trim()
@@ -1183,7 +1135,6 @@ const RESUME_PROMPT = [
  * @returns process exit code.
  */
 async function commandResume(positional, flags) {
-  failOnRemovedFlags(flags)
   ensureDirs()
   if (!fs.existsSync(BRIDGE_SERVER)) fail(`bridge server not found: ${BRIDGE_SERVER}`)
   let source = null
@@ -1313,7 +1264,6 @@ function commandStatus(positional, flags) {
  * @returns process exit code.
  */
 async function commandResult(positional, flags) {
-  failOnRemovedFlags(flags)
   ensureDirs()
   const jobId = positional[0]
   if (jobId === undefined) fail('result requires a job id')
@@ -1539,7 +1489,6 @@ async function commandCancel(positional, flags) {
 }
 
 async function commandWait(positional, flags) {
-  failOnRemovedFlags(flags)
   ensureDirs()
   const jobId = positional[0]
   if (jobId === undefined) fail('wait requires a job id')
@@ -2118,7 +2067,9 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
 // ---------------------------------------------------------------------------
 async function main() {
   const [command, ...rest] = process.argv.slice(2)
-  const { positional, flags } = parseArgs(rest)
+  // The command's own flag spec gates every token before any side effect: an
+  // unknown or malformed flag calls `fail` here, not inside the command.
+  const { positional, flags } = parseArgs(rest, specForCommand(command), fail)
 
   switch (command) {
     case '__run': {
