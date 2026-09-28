@@ -12,8 +12,8 @@
  *   threshold from `scripts/jev/questions.mjs`, so the CLI and the server ask
  *   the same question of the same lines.
  * - `jev_check_scope` takes `{work_order, repo?, base?}` and reuses `jev review`
- *   (no duplicated detectors) over `base..HEAD` plus untracked files, returning
- *   the flagged groups and the look-here hunks.
+ *   (no duplicated detectors) over `base..HEAD`, the uncommitted tracked changes,
+ *   and the untracked files, returning the flagged groups and the look-here hunks.
  *
  * The self-check loop as a whole is UNVALIDATED; the underlying questions are
  * measured. With no key both tools return a clear "Jev disabled" text result
@@ -73,9 +73,10 @@ const TOOLS = [
     name: 'jev_check_scope',
     description:
       'Review your own diff before you answer. Runs the same `jev review` detectors (no duplication) ' +
-      'over base..HEAD plus untracked files and returns the flagged groups and look-here hunks. Pass ' +
-      'the base commit you started from. UNVALIDATED self-check loop; the review detectors are ' +
-      'measured. Use it to find out-of-scope hunks, not as an approval.',
+      'over base..HEAD, the uncommitted tracked changes, and the untracked files, and returns the ' +
+      'flagged groups and look-here hunks. Pass the base commit you started from. UNVALIDATED ' +
+      'self-check loop; the review detectors are measured. Use it to find out-of-scope hunks, not as ' +
+      'an approval.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -19,11 +19,15 @@ import { FITS_ROLE_V2, CAN_DEFER, NEEDS_BACKGROUND } from './questions.mjs'
 import { resolvePromptFile, readPromptFile } from './prompt-file.mjs'
 
 /**
- * The measured caveat. Printed with every suggestion, and stored on the JSON
- * report, so no caller mistakes the ranking for a dispatch.
+ * The measured caveat. It is folded into the one `experimental:` stderr line
+ * every run prints, and stored on the JSON report, so no caller mistakes the
+ * ranking for a dispatch.
  */
 export const ROUTE_CAVEAT =
   'routing measured 40.9% top-1 / 54.5% top-2 on 22 work orders — a suggestion for the orchestrator, not a dispatch'
+
+/** The one stderr line `jev route` prints: opt-in, not part of the standard loop. */
+export const ROUTE_EXPERIMENTAL = `experimental: ${ROUTE_CAVEAT}`
 
 /** A role with a `fits_role_v2` probability at or above this is suggested. */
 export const FITS_SUGGEST = 0.5
@@ -122,7 +126,7 @@ export function adviceLines(answers) {
 
 function renderHuman(report, ctx) {
   const lines = []
-  lines.push('jev route — a suggestion for the orchestrator, not a dispatch (extras can_defer/needs_background are UNVALIDATED)')
+  lines.push('jev route — role suggestion; extras can_defer/needs_background are UNVALIDATED')
   lines.push(`prompt     ${report.promptFile}`)
   lines.push(`roles      ${report.ranked.length}`)
   report.ranked.forEach((role, index) => {
@@ -135,7 +139,6 @@ function renderHuman(report, ctx) {
     lines.push('advice:')
     for (const line of report.advice) lines.push(`  - ${line}`)
   }
-  lines.push(ROUTE_CAVEAT)
   ctx.stdout.write(`${lines.join('\n')}\n`)
 }
 
@@ -144,6 +147,8 @@ function renderHuman(report, ctx) {
  * @returns 0 on a suggestion (or a missing roles file), 1 on a read/API error.
  */
 export async function runRoute(positional, flags, ctx) {
+  // Experimental: opt-in, and the measured caveat is folded into this one line.
+  ctx.stderr.write(`${ROUTE_EXPERIMENTAL}\n`)
   const env = ctx.env
   if (!isEnabled(env)) {
     ctx.stdout.write(`${DISABLED_LINE}\n`)

@@ -50,11 +50,12 @@ Claude / Gemini / Codex ──MCP stdio──▶ server.cjs ──ACP──▶ d
 The top row is the delegation path; the lower branch is how the finished session gets filed under
 your project's Workspace instead of "Ungrouped".
 
-With Jev configured, the same flow gains four optional checkpoints that never change a job's own
-state or exit code: a work-order lint before dispatch (`start --jev-lint`), a progress watch while it
-runs (`jev watch`, or `wait --jev-watch`), an automatic review of the clone's diff when it settles
-(`start --review-repo`), and a decision you record afterwards (`jev decide`). The review is a
-look-here list, not an approval.
+With Jev configured, the standard flow gains a work-order lint before dispatch (`start --jev-lint`,
+stored on the job and printed by `result`/`wait`), an automatic review of the clone's commits,
+uncommitted working tree and untracked files when it settles (`start --review-repo`), and a decision
+you record afterwards (`jev decide`). The review is a look-here list, not an approval. A progress
+watch (`jev watch`), a worker self-check (`start --jev-mcp`), and the planning aids are
+**experimental** and opt-in; see the Jev section below.
 
 ## What is in here
 
@@ -76,15 +77,15 @@ The `scripts/jev/` modules, one line each:
 - `client.mjs` — the TypeSafe HTTP client: key/endpoint resolution, retries, the request pool, and the `jev: disabled` line.
 - `questions.mjs` — the one source of the measured question wordings (`in_scope`/`unrequested`/`odd_hunk`, the lint nouls, `supported`, `failure_kind`, role/skill/conflict, `progress`).
 - `rules.mjs` — the code hard rules and the `.agents/jev.json` loader.
-- `diff.mjs` — git hunk collection, commit/untracked grouping, and the 7-hunk request cap.
-- `review.mjs` — `jev review` and the report the auto-review stores.
-- `lint.mjs` — `jev lint` and the `start --jev-lint` hook.
+- `diff.mjs` — git hunk collection, commit/worktree/untracked grouping, and the 7-hunk request cap.
+- `review.mjs` — `jev review` (including `--scope uncommitted`) and the report the auto-review stores.
+- `lint.mjs` — `jev lint`, the `start --jev-lint` hook, and the stored `jevLint` block.
 - `claims.mjs` — `jev claims` and the shared ±6-line evidence reader.
 - `watch.mjs` — `jev watch` and the `wait --jev-watch` probe.
 - `triage.mjs` — `jev triage`'s code rules and Jev fallback.
-- `route.mjs` / `skills.mjs` / `conflicts.mjs` — the three planning aids.
+- `route.mjs` / `skills.mjs` / `conflicts.mjs` — the three experimental planning aids.
 - `decide.mjs` — `jev decide` / `jev log`.
-- `auto.mjs` — the auto-review lifecycle and the `result`/`wait` block.
+- `auto.mjs` — the auto-review lifecycle (scope guard, claims, stored lint) and the `result`/`wait` block.
 - `prompt-file.mjs` / `paths.mjs` / `job-result.mjs` — shared readers for prompt files, source paths, and stored job results.
 
 ## Requirements
@@ -209,11 +210,11 @@ known-answer evaluation, 2026-09-27; everything else is marked UNVALIDATED.
 | Auto-review on settle | `start --review-repo DIR` | The same review, run by the worker when the job settles | as `jev review` |
 | Report claims | `jev claims <jobId> --repo DIR` | Do the cited lines support the sentence? | measured: AUC 0.950 on 46+46 claims; 0.3 → precision 0.905 / recall 0.826 |
 | Work-order lint | `jev lint --prompt-file F`, `start --jev-lint` | Is the brief self-contained, one outcome, write policy stated? | wording measured on 22 real work orders (0–4.5% false warnings); code checks UNVALIDATED |
-| Progress watch | `jev watch <jobId>`, `wait --jev-watch` | Is the run looping, blocked, or off-task? | UNVALIDATED |
-| Failure triage | `jev triage <jobId>` | Code rules first; a Jev failure kind only when no rule matches | code rules deterministic; Jev branch UNVALIDATED |
-| Role routing | `jev route --prompt-file F` | Which role fits, background vs blocking, off-peak? | measured 40.9% top-1 / 54.5% top-2 on 22 orders; `can_defer`/`needs_background` UNVALIDATED |
-| Skill suggestion | `jev skills --prompt-file F` | Which project skill to attach? | UNVALIDATED |
-| Cross-job conflicts | `jev conflicts <jobId> <jobId> ...` | Do findings from different jobs contradict each other? | measured on synthetic contradictions only, AUC 0.997 |
+| Progress watch | `jev watch <jobId>`, `wait --jev-watch` | Is the run looping, blocked, or off-task? | UNVALIDATED; `wait --jev-watch` is experimental |
+| Failure triage | `jev triage <jobId>` | Code rules first; a Jev failure kind only when no rule matches | code rules deterministic and standard; Jev branch UNVALIDATED and experimental |
+| Role routing | `jev route --prompt-file F` | Which role fits, background vs blocking, off-peak? | measured 40.9% top-1 / 54.5% top-2 on 22 orders; `can_defer`/`needs_background` UNVALIDATED; experimental |
+| Skill suggestion | `jev skills --prompt-file F` | Which project skill to attach? | UNVALIDATED; experimental |
+| Cross-job conflicts | `jev conflicts <jobId> <jobId> ...` | Do findings from different jobs contradict each other? | measured on synthetic contradictions only, AUC 0.997; experimental |
 | Decision log | `jev decide <jobId> ...`, `jev log` | Accept/reject/partial labels and flagged/clean agreement | local; no key needed |
 
 **Quick start** (five steps):
@@ -226,8 +227,19 @@ node "$OFF" wait <jobId>                                         # result + `---
 node "$OFF" jev decide <jobId> accept --note "looked right"      # tune thresholds over time
 ```
 
-Point `--review-repo` at the clone the job changes: the review diffs it from `--review-base` (default
-HEAD at start time) to HEAD and includes its untracked files.
+That is the standard loop. Point `--review-repo` at the clone the job changes: the review diffs it
+from `--review-base` (default HEAD at start time) to HEAD, then adds the **uncommitted tracked
+changes** (`worktree` group, staged and unstaged) and the **untracked files** — so a job that could
+not commit is still reviewed, and a commit in the range never appears twice. When `--review-repo` is
+the job's own `--cwd` checkout, the review records `reviewScope: 'uncommitted'` (commits there may be
+the orchestrator's) and warns to **use a clone for commit review**. `--jev-lint` stores its findings
+on the job and `result`/`wait` print them as `lint:` lines.
+
+**Experimental (opt-in, not part of the standard loop).** `start --jev-mcp`, `wait --jev-watch`,
+the Jev branch of `jev triage`, `jev route`, `jev skills`, and `jev conflicts` are opt-in helpers
+that print one `experimental: …` line on stderr when they run. They suggest, never approve or
+dispatch; their `UNVALIDATED` or synthetic-only labels live in the
+[deepseek-offload skill](.agents/skills/deepseek-offload/SKILL.md#experimental-opt-in-not-part-of-the-standard-loop).
 
 **Exit codes.**
 
@@ -376,7 +388,7 @@ Bridge and runner environment (all optional):
 | `dsh --profile acp exited with code …` | The `acp` profile cannot initialize: run `dsh --profile acp --dump-config` and read the error. |
 | A jev command prints `jev: disabled — set TYPESAFE_API_KEY` | Jev is optional: export `TYPESAFE_API_KEY` (or `TYPESAFE_AI_API`) to enable it. That line is a skip, not an error. |
 | Review flags legitimate hunks on a by-reference work order | Known limit (known-answer evaluation, 2026-09-27): a work order that describes its changes by reference ("replay/merge another branch", "merge duplicated logic") cannot be judged against the text alone. Review those hunks against the original work orders; the flags are a look-here list, not findings. |
-| `jevReview.state` is `empty`, block says `jev review: no changes in the review range` | The review repo had no changes between `--review-base` and HEAD (and no untracked files). Point `--review-repo` at the clone the job actually changed. |
+| `jevReview.state` is `empty`, block says `jev review: no changes in the review range` | The review repo had no commits in `--review-base`..HEAD, no uncommitted tracked changes, and no untracked files. Point `--review-repo` at the clone the job actually changed; if it is the job's own checkout, the guard reviews uncommitted + untracked only. |
 | A job error carrying `EROFS` / `EACCES` / `permission denied` | `jev triage` classifies it as an `environment` failure (code rule, no key needed): fix the path/permissions, then `resume`. |
 | You want to confirm the jev links are current | `doctor` has no separate Jev check and never looks at a key, and its `project entries current` line does not cover `scripts/jev` or `.agents/mcp-jev/server.cjs`. Re-run `install.sh --update` to refresh stale links; it replaces those like any other project entry. |
 
@@ -386,11 +398,10 @@ Bridge and runner environment (all optional):
 npm test
 ```
 
-`npm test` runs `node --test` over thirteen files: `tests/install.test.mjs`, `session-tail`,
-`git-guard`, `bridge-guard`, `read-only`, `resume`, the five Jev suites (`jev`, `jev-auto`,
-`jev-hardening`, `jev-planning`, `jev-selfcheck`), and the workspace-attach plugin's `adopt` and
-`inbox` tests. `tests/prompt-file.test.mjs` exists but is not wired into `npm test`; run it directly
-with `node --test tests/prompt-file.test.mjs`.
+`npm test` runs `node --test` over sixteen files: `tests/install.test.mjs`, `session-tail`,
+`git-guard`, `bridge-guard`, `read-only`, `prompt-file`, `resume`, the seven Jev suites (`jev`,
+`jev-auto`, `jev-hardening`, `jev-planning`, `jev-selfcheck`, `jev-worktree`,
+`jev-lint-experimental`), and the workspace-attach plugin's `adopt` and `inbox` tests.
 
 The Jev suites point `TYPESAFE_API_URL` at a local HTTP stub and set a dummy `TYPESAFE_API_KEY`, so
 the real API is never called; they also assert the key is never echoed into stdout, stderr, or the

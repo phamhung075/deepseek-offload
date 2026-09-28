@@ -31,6 +31,10 @@ export const CONTRADICTS_THRESHOLD = 0.5
 /** The always-printed caveat. */
 export const CONFLICTS_CAVEAT = 'measured on synthetic contradictions only (AUC 0.997)'
 
+/** The one stderr line `jev conflicts` prints: synthetic eval and opt-in. */
+export const CONFLICTS_EXPERIMENTAL =
+  'experimental: measured on synthetic contradiction pairs only (AUC 0.997); opt-in, not part of the standard loop'
+
 /** The unique file paths a text cites; line numbers are stripped. */
 export function extractPaths(text) {
   const paths = []
@@ -122,6 +126,7 @@ function renderHuman(report, ctx) {
  * @returns 0 on a report (even one with no pairs), 1 on a read/API error.
  */
 export async function runConflicts(positional, flags, ctx) {
+  ctx.stderr.write(`${CONFLICTS_EXPERIMENTAL}\n`)
   const env = ctx.env
   if (!isEnabled(env)) {
     ctx.stdout.write(`${DISABLED_LINE}\n`)

@@ -57,6 +57,12 @@ const JEV_MCP_SERVER = path.join(AGENTS_ROOT, 'mcp-jev', 'server.cjs')
 // The one sentence `--jev-mcp` appends to the job's prompt.
 const JEV_MCP_PROMPT_SENTENCE =
   'Before your final answer, you may call jev_check_claims on the file:line claims you make and jev_check_scope on your diff; fix or drop what they flag.'
+// The one stderr line each experimental Jev opt-in prints when it runs. The
+// standard loop is start --review-repo -> read the block -> jev decide; these
+// are deliberately outside it.
+const EXPERIMENTAL_PREFIX = 'experimental: '
+const JEV_MCP_EXPERIMENTAL = `${EXPERIMENTAL_PREFIX}UNVALIDATED worker self-check MCP loop`
+const JEV_WATCH_EXPERIMENTAL = `${EXPERIMENTAL_PREFIX}UNVALIDATED progress triage; may stop the wait early, leaving the job running`
 // The project the jobs belong to: the caller's directory. Job records and result
 // files live under it, so a project that vendors this repository keeps its own
 // job history.
@@ -1174,6 +1180,7 @@ async function commandStart(positional, flags) {
   // caller passed, and append the one prompt sentence that tells the worker the
   // tools exist. The merged config lives in the jobs dir with the job record.
   if (flags['jev-mcp'] === true) {
+    process.stderr.write(`${JEV_MCP_EXPERIMENTAL}\n`)
     if (!fs.existsSync(JEV_MCP_SERVER)) fail(`--jev-mcp server not found: ${JEV_MCP_SERVER}`)
     prompt = `${prompt}\n\n${JEV_MCP_PROMPT_SENTENCE}`
     try {
@@ -1498,6 +1505,7 @@ async function commandResult(positional, flags, { waitForReview = false } = {}) 
         env: process.env,
         projectRoot: PROJECT_ROOT,
         sessionTail: process.env.DSH_OFFLOAD_SESSION_TAIL || SESSION_TAIL,
+        stderr: process.stderr,
       })
       if (triage !== null) process.stdout.write(`\n${renderTriageBlock(jobId, triage)}\n`)
     } catch {
@@ -1722,6 +1730,7 @@ async function commandWait(positional, flags) {
   // a confident looping/blocked/off-task verdict stops the wait (exit 4) and
   // the job keeps running. Jev is optional, so no key means no watcher.
   const jevWatch = flags['jev-watch'] === true || process.env.DSH_OFFLOAD_JEV_WATCH === '1'
+  if (jevWatch) process.stderr.write(`${JEV_WATCH_EXPERIMENTAL}\n`)
   let watcher = null
   if (jevWatch) {
     try {
@@ -2278,23 +2287,21 @@ function usage() {
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
                                  --review-repo DIR  review the diff DIR receives once
                                    the job settles (DIR must be a git work tree; the
-                                   toplevel is stored). Its untracked files are
-                                   reviewed too, so point it at the clone the job
-                                   changes, never at --cwd. Also enabled by
-                                   DSH_OFFLOAD_REVIEW_REPO=DIR; --no-jev-review
-                                   disables it for this job.
+                                   toplevel is stored). Commits in the base..HEAD
+                                   range, the uncommitted tracked changes, and the
+                                   untracked files are all reviewed; point it at the
+                                   clone the job changes. When DIR is the job's own
+                                   --cwd checkout, only uncommitted + untracked are
+                                   reviewed (a warning says to use a clone for commit
+                                   review). Also enabled by DSH_OFFLOAD_REVIEW_REPO=DIR;
+                                   --no-jev-review disables it for this job.
                                  --review-base REV  the revision the review diffs from
                                    (default: HEAD at start time)
-                                 --jev-lint  run the UNVALIDATED Jev work-order lint
-                                   before dispatch and print its warnings; advisory
-                                   only (never blocks the start); also enabled by
-                                   DSH_OFFLOAD_JEV_LINT=1
-                                 # -- worker self-check (own block) --
-                                 --jev-mcp  mount the Jev self-check MCP server
-                                   (.agents/mcp-jev/server.cjs) and append its
-                                   one-sentence prompt hint; when --mcp-config is
-                                   also given its servers are merged in. UNVALIDATED
-                                   loop; no key makes the tools say "Jev disabled"
+                                 --jev-lint  run the advisory Jev work-order lint
+                                   before dispatch and print its warnings; the
+                                   findings are stored on the job and shown by
+                                   result/wait and status; never blocks the start;
+                                   also enabled by DSH_OFFLOAD_JEV_LINT=1
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
   resume <jobId> ["<extra>"]   continue an interrupted job's session in a new job
@@ -2306,19 +2313,15 @@ function usage() {
                                  override the source job's auto-review target
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
   result <jobId> [--json] [--jev-exit] [--no-jev-review]
-                               final report text, then the Jev pre-screen block when
-                               the job has a review clone; --jev-exit exits 3 when
-                               the review flagged
+                               final report text, then the stored lint (when the
+                               job ran --jev-lint) and the Jev pre-screen block
+                               when the job has a review clone; --jev-exit exits 3
+                               when the review flagged
   guard  <jobId> [--json]      git write guard state, and any refs the job pushed
                                into its sandbox instead of the real remote
   wait   <jobId> [--timeout-ms N] [--json] [--jev-exit] [--no-jev-review]
                                block until the job settles, then print the result
                                (waits for an in-flight review up to 180000 ms)
-                                 --jev-watch  UNVALIDATED early return: reuse the
-                                   jev watch triage every --watch-interval-ms
-                                   (default 120000, env DSH_OFFLOAD_JEV_WATCH=1)
-                                   and exit 4 on a confident looping/blocked/
-                                   off-task verdict, leaving the job running
   update <jobId> "<new info>"    steer a running job onto the right track
   cancel <jobId>                stop a running job outright, no redirect
   list   [--all] [--json]      recent jobs
@@ -2350,9 +2353,23 @@ function usage() {
                                record a label and append it to jev-log.jsonl
   jev log [--json]             decision counts, flagged/clean agreement, and a
                                P(none) what-if at 0.4/0.5/0.6
-  jev triage <jobId> [--json]  failure triage (code rules first, then one
-                               UNVALIDATED Jev failure_kind); never auto-resumes
-  # -- Jev planning aids (own block; each command only SUGGESTS) --
+  # -- Experimental (opt-in, not part of the standard loop) --
+  # The standard loop is: start --review-repo DIR -> read the result block ->
+  # jev decide. Everything under this heading is opt-in and prints one
+  # "experimental:" line when it runs.
+  start --jev-mcp              mount the Jev self-check MCP server
+                               (.agents/mcp-jev/server.cjs) and append its
+                               one-sentence prompt hint; when --mcp-config is
+                               also given its servers are merged in. UNVALIDATED
+                               loop; no key makes the tools say "Jev disabled"
+  wait --jev-watch             UNVALIDATED early return: reuse the jev watch
+                               triage every --watch-interval-ms (default 120000,
+                               env DSH_OFFLOAD_JEV_WATCH=1) and exit 4 on a
+                               confident looping/blocked/off-task verdict,
+                               leaving the job running
+  jev triage <jobId> [--json]  failure triage: the code rules are standard; the
+                               Jev failure_kind fallback is UNVALIDATED. Never
+                               auto-resumes.
   jev route --prompt-file F [--roles-file R] [--json]
                                rank roles the work order fits (measured 2026-09-27:
                                40.9% top-1 / 54.5% top-2), advise background vs
@@ -2368,8 +2385,8 @@ function usage() {
                                pairs findings from different jobs that share a
                                file path and asks whether they contradict each
                                other (measured on SYNTHETIC pairs only, AUC 0.997).
-                               Jev is optional and a pre-screen only — the
-                               orchestrator still reviews every diff.
+                               Suggestions only — the orchestrator still reviews
+                               every diff.
 
 Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
              DEEPSEEK_MCP_TIMEOUT_MS, DEEPSEEK_MCP_CONFIG, DEEPSEEK_MCP_SKIP,

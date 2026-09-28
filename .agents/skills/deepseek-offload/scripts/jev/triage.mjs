@@ -14,6 +14,10 @@ import { readActivity, WATCH_ACTIVITY_LINES } from './watch.mjs'
 export const EXIT_TRIAGE_OK = 0
 export const EXIT_TRIAGE_ERROR = 1
 
+/** One stderr line when the Jev fallback runs; the code rules stay standard. */
+export const TRIAGE_EXPERIMENTAL =
+  'experimental: UNVALIDATED failure_kind fallback; code rules stay standard'
+
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
 
 /** The job's own timeout, so the timeout advice can double it. */
@@ -99,6 +103,9 @@ export async function triageJob(jobId, job, ctx = {}) {
   if (!isEnabled(env)) {
     return { kind: 'unknown', source: 'none', advice: `read the worker log and decide; no Jev key is set`, error: errorText }
   }
+
+  // The Jev fallback is the experimental part of triage; warn where it runs.
+  if (ctx.stderr && typeof ctx.stderr.write === 'function') ctx.stderr.write(`${TRIAGE_EXPERIMENTAL}\n`)
 
   let activity = []
   try {

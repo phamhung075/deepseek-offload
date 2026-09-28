@@ -42,7 +42,9 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
                                with a P(none) what-if at 0.4/0.5/0.6.
   jev triage <jobId> [--json]  failure triage: code rules first, then one
                                UNVALIDATED Jev failure_kind when no rule
-                               matches. Never auto-resumes.
+                               matches. Never auto-resumes. EXPERIMENTAL (the
+                               Jev branch prints an experimental: line).
+  # -- Experimental (opt-in, not part of the standard loop) --
   jev route --prompt-file F [--roles-file R] [--json]
                                rank the roles a work order fits (measured
                                2026-09-27: 40.9% top-1 / 54.5% top-2) and advise
@@ -58,13 +60,13 @@ export const JEV_USAGE = `  jev review <jobId> --repo DIR --base REV [--head REV
                                find findings from different jobs that share a
                                file path and contradict each other (measured on
                                SYNTHETIC pairs only, AUC 0.997). Suggests only.
-                             Auto-review is configured on start/resume with
-                             --review-repo DIR (or DSH_OFFLOAD_REVIEW_REPO); the
-                             worker runs it when the job settles and result/wait
-                             print the stored block (--jev-exit exits 3 on a
-                             flagged review). wait --jev-watch stops early on a
-                             confident watch problem.
-                             Jev is optional (TYPESAFE_API_KEY or
+                             The standard loop is: start --review-repo DIR ->
+                             read the result block -> jev decide. Auto-review is
+                             configured on start/resume with --review-repo DIR
+                             (or DSH_OFFLOAD_REVIEW_REPO); the worker runs it
+                             when the job settles and result/wait print the
+                             stored block (--jev-exit exits 3 on a flagged
+                             review). Jev is optional (TYPESAFE_API_KEY or
                              TYPESAFE_AI_API; endpoint TYPESAFE_API_URL).
                              It is a pre-screen — the orchestrator still
                              reviews every diff.

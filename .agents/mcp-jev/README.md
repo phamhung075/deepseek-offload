@@ -68,9 +68,9 @@ Output is a JSON text result:
 ### `jev_check_scope`
 
 > Review your own diff before you answer. Runs the same `jev review` detectors (no duplication) over
-> base..HEAD plus untracked files and returns the flagged groups and look-here hunks. Pass the base
-> commit you started from. UNVALIDATED self-check loop; the review detectors are measured. Use it to
-> find out-of-scope hunks, not as an approval.
+> base..HEAD, the uncommitted tracked changes, and the untracked files, and returns the flagged
+> groups and look-here hunks. Pass the base commit you started from. UNVALIDATED self-check loop; the
+> review detectors are measured. Use it to find out-of-scope hunks, not as an approval.
 
 | Input | Type | Meaning |
 | :--- | :--- | :--- |

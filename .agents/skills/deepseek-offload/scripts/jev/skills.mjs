@@ -21,6 +21,10 @@ export const SHORTLIST = 3
 /** How many lines of each shortlisted `SKILL.md` the second request reads. */
 export const EXCERPT_LINES = 60
 
+/** The one stderr line `jev skills` prints: UNVALIDATED and opt-in. */
+export const SKILLS_EXPERIMENTAL =
+  'experimental: UNVALIDATED skill suggestion (questions and thresholds never measured); opt-in, not part of the standard loop'
+
 /** The default skills directory, below the project root. */
 export const SKILLS_DIRNAME = path.join('.agents', 'skills')
 
@@ -154,6 +158,7 @@ function renderHuman(report, ctx) {
  * @returns 0 on a suggestion (or too few skills), 1 on a read/API error.
  */
 export async function runSkills(positional, flags, ctx) {
+  ctx.stderr.write(`${SKILLS_EXPERIMENTAL}\n`)
   const env = ctx.env
   if (!isEnabled(env)) {
     ctx.stdout.write(`${DISABLED_LINE}\n`)
