@@ -15,7 +15,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { globMatch, extractNamedPaths, isTestSibling, isUnderNamedPath } from '../.agents/skills/deepseek-offload/scripts/jev/rules.mjs'
+import { globMatch, extractNamedPaths, isTestSibling, isUnderNamedPath, expandBraces, BRACE_EXPANSION_MAX } from '../.agents/skills/deepseek-offload/scripts/jev/rules.mjs'
 import { extractClaims } from '../.agents/skills/deepseek-offload/scripts/jev/claims.mjs'
 import { TRIAGE_RULES, matchRule } from '../.agents/skills/deepseek-offload/scripts/jev/triage.mjs'
 import { summarizeLog, minPNone } from '../.agents/skills/deepseek-offload/scripts/jev/decide.mjs'
@@ -79,6 +79,22 @@ test('named-path extraction keeps dot-directories, drops bare dots, and scopes b
     extractNamedPaths('ignore .. and ... but keep ./notes.md and .env here', process.cwd()).map((entry) => entry.value),
     ['notes.md', '.env'],
   )
+})
+
+test('brace expansion and segment-aligned named paths', () => {
+  assert.deepEqual(expandBraces('a/{x,y}.mjs'), ['a/x.mjs', 'a/y.mjs'])
+  assert.deepEqual(expandBraces('a/{x,y}/b'), ['a/x/b', 'a/y/b'])
+  assert.deepEqual(expandBraces('a/{x,y}/{p,q}.mjs'), ['a/x/p.mjs', 'a/x/q.mjs', 'a/y/p.mjs', 'a/y/q.mjs'])
+  assert.deepEqual(expandBraces('a/{x}.mjs'), ['a/{x}.mjs'], 'a group with no comma is unchanged')
+  assert.deepEqual(expandBraces('a/{x, y}.mjs'), ['a/{x, y}.mjs'], 'spaces inside a group leave it unchanged')
+  const big = '{a,b}'.repeat(7)
+  assert.deepEqual(expandBraces(big), [big], 'over the cap the token is left as-is')
+  assert.equal(BRACE_EXPANSION_MAX, 64)
+  const named = extractNamedPaths('edit scripts/jev/{diff,route}.mjs', process.cwd()).map((entry) => entry.value)
+  assert.deepEqual(named, ['scripts/jev/diff.mjs', 'scripts/jev/route.mjs'])
+  const file = '.agents/skills/x/scripts/jev/route.mjs'
+  const under = (name) => isUnderNamedPath(file, extractNamedPaths(name, process.cwd()))
+  assert.deepEqual([under('scripts/jev/route.mjs'), under('scripts/jev'), under('jev/rou'), under('other/jev/route.mjs')], [true, true, false, false])
 })
 
 test('citation extraction handles path:line, path:~line and path:line-line', () => {

@@ -45,6 +45,14 @@ export const SEVERITY_WARN = 'warn'
 
 const GLOB_SPECIALS = new Set(['\\', '^', '$', '.', '|', '+', '(', ')', '[', ']', '{', '}'])
 
+/** Most alternatives `expandBraces` will emit for one token before giving up. */
+export const BRACE_EXPANSION_MAX = 64
+
+// A path-ish run that contains at least one brace group, e.g. `a/{x,y}/b.mjs`
+// or `a/{x,y}/{p,q}.mjs`. Only brace groups with a comma and no whitespace are
+// expanded; anything else is left to the normal tokeniser.
+const BRACE_TOKEN_RE = /[A-Za-z0-9_@./~:+-]*(?:\{[^{}\s]*\}[A-Za-z0-9_@./~:+-]*)+/g
+
 /**
  * Translate a small glob (`**`, `*`, `?`) into an anchored regular expression.
  * `*`/`?` never cross `/`; `**` crosses anything, and a `**` followed by a
@@ -200,16 +208,73 @@ function stripDecoration(token) {
 }
 
 /**
- * Extract the repo-relative paths/directories a work order names. A token
- * qualifies when it contains `/` or a file extension; absolute paths inside the
- * review repo are made relative, and everything else is dropped.
+ * Split a token into literal strings and the brace-group option lists it holds.
+ * A group counts only when it contains a comma and no whitespace or nested
+ * braces; every other `{...}` stays literal.
+ */
+function braceSegments(token) {
+  const segments = []
+  let literal = ''
+  for (let index = 0; index < token.length; index++) {
+    if (token[index] !== '{') {
+      literal += token[index]
+      continue
+    }
+    const close = token.indexOf('}', index + 1)
+    const inner = close === -1 ? null : token.slice(index + 1, close)
+    if (inner === null || !inner.includes(',') || /[\s{}]/.test(inner)) {
+      literal += token[index]
+      continue
+    }
+    if (literal !== '') {
+      segments.push(literal)
+      literal = ''
+    }
+    segments.push(inner.split(','))
+    index = close
+  }
+  if (literal !== '') segments.push(literal)
+  return segments
+}
+
+/**
+ * Expand the brace groups of one path-like token into its cartesian product:
+ * `a/{x,y}.mjs` becomes `['a/x.mjs', 'a/y.mjs']` and several groups multiply.
+ * A group without a comma or with spaces inside, and any expansion larger than
+ * `BRACE_EXPANSION_MAX`, leaves the token unchanged as a single result.
+ */
+export function expandBraces(token) {
+  const text = String(token ?? '')
+  let results = ['']
+  for (const segment of braceSegments(text)) {
+    const options = Array.isArray(segment) ? segment : [segment]
+    const next = []
+    for (const prefix of results) {
+      for (const option of options) next.push(prefix + option)
+    }
+    if (next.length > BRACE_EXPANSION_MAX) return [text]
+    results = next
+  }
+  return results
+}
+
+/** Replace every expandable brace token in `text` with its options, space-separated. */
+function expandBraceTokens(text) {
+  return text.replace(BRACE_TOKEN_RE, (token) => expandBraces(token).join(' '))
+}
+
+/**
+ * Extract the repo-relative paths/directories a work order names. Brace groups
+ * in path-like tokens are expanded first (`a/{x,y}.mjs` names both files). A
+ * token qualifies when it contains `/` or a file extension; absolute paths
+ * inside the review repo are made relative, and everything else is dropped.
  * @returns `{value, raw}[]`, deduped in first-seen order.
  */
 export function extractNamedPaths(workOrder, repo) {
   const out = []
   const seen = new Set()
   const absoluteRepo = typeof repo === 'string' && repo !== '' ? path.resolve(repo) : null
-  for (const match of String(workOrder ?? '').matchAll(NAMED_TOKEN_RE)) {
+  for (const match of expandBraceTokens(String(workOrder ?? '')).matchAll(NAMED_TOKEN_RE)) {
     const raw = match[0]
     if (raw.includes('://')) continue
     let value = stripDecoration(raw)
@@ -233,15 +298,16 @@ export function extractNamedPaths(workOrder, repo) {
 }
 
 /**
- * Whether a hunk file is covered by a named path. A name with `/` keeps prefix
- * semantics (the path itself or anything under it); a bare file name without
- * `/` matches a hunk whose basename equals it at any depth.
+ * Whether a hunk file is covered by a named path. A name with `/` matches as a
+ * segment-aligned prefix or suffix at any depth (`scripts/jev/route.mjs` covers
+ * `.agents/.../scripts/jev/route.mjs`); a bare file name without `/` matches a
+ * hunk whose basename equals it at any depth.
  */
 export function isUnderNamedPath(file, named) {
   const base = String(file ?? '').split('/').pop() ?? ''
   for (const { value } of named) {
     if (value.includes('/')) {
-      if (file === value || file.startsWith(`${value}/`)) return true
+      if (file === value || file.startsWith(`${value}/`) || file.endsWith(`/${value}`) || file.includes(`/${value}/`)) return true
     } else if (base === value) {
       return true
     }
