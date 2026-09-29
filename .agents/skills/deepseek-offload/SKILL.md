@@ -84,29 +84,40 @@ same frame channel — but `session-tail.mjs` still works when no GUI is open at
 >    (or `wait --timeout-ms <N>`) and conclude your turn so the model sleeps until the timer fires.
 > 3. Check progress only after the timer expires, or wait for background process reactive wakeup.
 
-### Push-back instead of polling (Claude Code): `run_in_background`
+### Universal background wait pattern: push-back instead of polling
 
-Claude Code's own `Bash` tool has a `run_in_background: true` mode: it detaches the command and
-**automatically re-invokes the calling session the moment that command's process exits** — no
-manual polling, no tight loop, and no need for the user to ask "is it done yet." When the caller
-genuinely has nothing else to do while a job runs (the common case for a single-job dispatch with
-no parallel workstream), prefer this over both tight-loop `status`/`result` polling and a foreground
-blocking call:
+Every orchestrator with background shell capability can turn `wait` into a real completion
+callback: launch the command in the background and the runner re-invokes the session when its
+process exits, so no orchestrator turn is spent polling. Claude Code's `Bash` tool does this with
+`run_in_background: true`; Antigravity/Gemini do it with a background `run_command` task plus
+reactive wakeup; any runner that can detach a shell and notify on exit behaves the same way. Reach
+for it whenever the caller genuinely has nothing else to do while the jobs run.
 
 ```sh
-# from Claude Code's Bash tool, with run_in_background: true
-node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId> --timeout-ms 1800000
+# Run in background (run_in_background: true / background command):
+for j in <jobId1> <jobId2>; do
+  node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait $j --timeout-ms 3600000 2>&1 \
+    | sed -n '/--- result ---/,$p' \
+    | cut -c1-2600 \
+    | head -50
+done
 ```
 
-`wait` already polls internally at a sane interval and blocks until the job settles, so wrapping it
-in a backgrounded shell exec turns that one blocking call into a real completion callback: the shell
-process (not the whole session) blocks on it, control returns immediately after dispatch, and the
-harness delivers the finished `wait` output back to the session unprompted when it exits.
+Why this shape:
 
-This is **Claude-Code-specific** — the `run_in_background` re-invoke mechanism is a Claude Code
-harness feature, not something the DeepSeek Harness or the MCP bridge itself provides. Other MCP
-clients following this skill (Gemini, Codex) should keep using the non-blocking `start` + periodic
-`result` pattern above, since they have no equivalent callback.
+1. **Zero Assistant Turns**: runs entirely in the background shell until the jobs settle, triggering
+   a single reactive wakeup on completion instead of wasting turns polling
+   `manage_task(status ...)` or `result`.
+2. **Filters Heartbeat Noise**: `sed -n '/--- result ---/,$p'` strips the intermediate
+   `waiting running 15s...` progress messages, delivering only the clean deliverable.
+3. **Guards Against Context Inflation**: `cut -c1-2600 | head -50` bounds line length and line
+   count, protecting the context window.
+4. **Supports Parallel Fan-Out**: the `for j in ...` loop waits on multiple concurrent jobs
+   sequentially within a single background process, aggregating results cleanly.
+5. **Runner-Agnostic**: this works across agent runners with background shell capabilities — Claude
+   Code (`run_in_background: true`), Antigravity/Gemini (`run_command` background tasks with
+   reactive wakeup), and equivalents — not just Claude Code. The DeepSeek Harness and the MCP
+   bridge only supply the blocking `wait` being wrapped; the callback comes from the runner.
 
 Still prefer plain fire-and-forget `start` (no `wait` at all) when there **is** other orchestrator
 work to do meanwhile — see "Non-blocking dispatch" in the project `AGENTS.md` §7. Reach for the
