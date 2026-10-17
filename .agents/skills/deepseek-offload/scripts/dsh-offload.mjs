@@ -44,6 +44,9 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
+import { resolvePromptFile } from './lib/prompt-file.mjs'
+import { triageJob, renderTriageBlock } from './lib/triage.mjs'
 
 // ---------------------------------------------------------------------------
 // Paths and defaults
@@ -171,9 +174,12 @@ function listJobIds() {
     .readdirSync(JOBS_DIR)
     .filter((name) => name.endsWith('.json'))
     .map((name) => name.slice(0, -'.json'.length))
+    .filter((id) => JOB_ID_RE.test(id))
     .sort()
     .reverse()
 }
+
+const JOB_ID_RE = /^job-\d{8}-\d{6}-[0-9a-f]{4}$/
 
 function newJobId() {
   const now = new Date()
@@ -268,44 +274,6 @@ function formatLocal(ms, tz) {
 
 function print(value, asJson) {
   if (asJson) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
-}
-
-// ---------------------------------------------------------------------------
-// Argument parsing
-// ---------------------------------------------------------------------------
-function parseArgs(argv) {
-  const positional = []
-  const flags = {}
-  // Short flags stay separate from long ones: `-f` is stored as `f` (never
-  // merged with the long form), and a lone `-` is kept as a positional token
-  // because it is the stdin sentinel, not a flag.
-  for (let i = 0; i < argv.length; i++) {
-    const token = argv[i]
-    if (token.startsWith('--')) {
-      const [name, inline] = token.slice(2).split('=')
-      if (inline !== undefined) {
-        flags[name] = inline
-      } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
-        flags[name] = argv[i + 1]
-        i++
-      } else {
-        flags[name] = true
-      }
-    } else if (token.startsWith('-') && token !== '-') {
-      const [name, inline] = token.slice(1).split('=')
-      if (inline !== undefined) {
-        flags[name] = inline
-      } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('-')) {
-        flags[name] = argv[i + 1]
-        i++
-      } else {
-        flags[name] = true
-      }
-    } else {
-      positional.push(token)
-    }
-  }
-  return { positional, flags }
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,9 +1009,7 @@ function launchWorker(record) {
 
 async function commandStart(positional, flags) {
   ensureDirs()
-  const promptFile = typeof flags['prompt-file'] === 'string'
-    ? flags['prompt-file']
-    : typeof flags.f === 'string' ? flags.f : null
+  const promptFile = resolvePromptFile(flags)
   let prompt = positional.join(' ').trim()
   if (promptFile !== null) {
     if (!fs.existsSync(promptFile)) fail(`prompt file not found: ${promptFile}`)
@@ -1077,6 +1043,7 @@ async function commandStart(positional, flags) {
   const deferredUntil = flags['defer-to-off-peak'] === true && isPeakAt(now) ? nextOffPeakStart(now) : null
 
   const jobId = newJobId()
+
   const record = {
     jobId,
     label: typeof flags.label === 'string' ? flags.label : null,
@@ -1289,7 +1256,14 @@ function commandStatus(positional, flags) {
   return 0
 }
 
-function commandResult(positional, flags) {
+/**
+ * Print a job's final result. A failed job also gets the deterministic failure
+ * triage appended; it never changes the result.
+ * @param positional - `[jobId]`.
+ * @param flags - `--json`.
+ * @returns process exit code.
+ */
+async function commandResult(positional, flags) {
   ensureDirs()
   const jobId = positional[0]
   if (jobId === undefined) fail('result requires a job id')
@@ -1297,7 +1271,8 @@ function commandResult(positional, flags) {
   const file = resultFile(jobId)
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
   if (flags.json === true) {
-    print({ jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, result: text }, true)
+    const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, result: text }
+    print(payload, true)
     return job.state === 'error' ? 1 : 0
   }
   if (isActiveState(job.state)) {
@@ -1305,6 +1280,14 @@ function commandResult(positional, flags) {
     return 2
   }
   process.stdout.write(`${describeJob(job)}\n\n--- result ---\n${text === '' ? '(no output captured)\n' : text}`)
+  if (job.state === 'error') {
+    try {
+      const triage = triageJob(jobId, job, { env: process.env })
+      if (triage !== null) process.stdout.write(`\n${renderTriageBlock(jobId, triage)}\n`)
+    } catch {
+      /* triage is advisory; it never changes the result */
+    }
+  }
   return job.state === 'error' ? 1 : 0
 }
 
@@ -1518,6 +1501,7 @@ async function commandWait(positional, flags) {
   // waiting — then one line per state change and a heartbeat every 15s.
   const human = flags.json !== true
   if (human) process.stdout.write(`${describeJob(job, { full: true })}\n\nwaiting   for the job to settle; Ctrl-C stops waiting, not the job\n`)
+
   let lastState = job.state
   let lastLine = Date.now()
   while (isActiveState(job.state)) {
@@ -2022,7 +2006,7 @@ function commandWindow(_positional, flags) {
 function usage() {
   process.stdout.write(`dsh-offload — background DeepSeek delegation through the MCP bridge
 
-  doctor                       verify bridge, DSH_HOME, acp model, MCP config and job store
+  doctor [--json]              verify bridge, DSH_HOME, acp model, MCP config and job store
   window [--tz IANA] [--json]  DeepSeek peak/off-peak status now, and when it next flips
   start "<prompt>" [flags]     launch a background job; prints job id + session id
                                  --prompt-file FILE, -f FILE   read the prompt from FILE
@@ -2049,12 +2033,14 @@ function usage() {
                                  a session with no job record; --label --timeout-ms
                                  --read-only --allow-git-write --mcp-config --json
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
-  result <jobId> [--json]      final report text
+  result <jobId> [--json]      final report text, plus the deterministic failure
+                               triage when the job ended in error
   guard  <jobId> [--json]      git write guard state, and any refs the job pushed
                                into its sandbox instead of the real remote
-  wait   <jobId> [--timeout-ms N]   block until the job settles, then print the result
-  update <jobId> "<new info>"    steer a running job onto the right track
-  cancel <jobId>                stop a running job outright, no redirect
+  wait   <jobId> [--timeout-ms N] [--json]
+                               block until the job settles, then print the result
+  update <jobId> "<new info>" [--json]  steer a running job onto the right track
+  cancel <jobId> [--json]      stop a running job outright, no redirect
   list   [--all] [--json]      recent jobs
   sessions [--cwd DIR] [--json]     sessions in the shared DSH store (what the GUI shows)
   sync-workspace [--all] [--dry-run] [--wait-ms N] [--json]
@@ -2081,7 +2067,9 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
 // ---------------------------------------------------------------------------
 async function main() {
   const [command, ...rest] = process.argv.slice(2)
-  const { positional, flags } = parseArgs(rest)
+  // The command's own flag spec gates every token before any side effect: an
+  // unknown or malformed flag calls `fail` here, not inside the command.
+  const { positional, flags } = parseArgs(rest, specForCommand(command), fail)
 
   switch (command) {
     case '__run': {
@@ -2111,7 +2099,7 @@ async function main() {
       process.exitCode = commandStatus(positional, flags)
       return
     case 'result':
-      process.exitCode = commandResult(positional, flags)
+      process.exitCode = await commandResult(positional, flags)
       return
     case 'guard':
       process.exitCode = commandGuard(positional, flags)

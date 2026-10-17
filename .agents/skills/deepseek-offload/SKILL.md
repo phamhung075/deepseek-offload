@@ -12,7 +12,8 @@ description: >-
   how to follow a running job (the web GUI lists its session but cannot show it
   live), prompt contracts for self-contained jobs, the git write guard that refuses
   commits and pushes by default, the `--read-only` file policy for investigation jobs,
-  and the security and token rules.
+  and the security and
+  token rules.
 ---
 
 # DeepSeek Background Offload — delegating work from other LLMs
@@ -83,29 +84,40 @@ same frame channel — but `session-tail.mjs` still works when no GUI is open at
 >    (or `wait --timeout-ms <N>`) and conclude your turn so the model sleeps until the timer fires.
 > 3. Check progress only after the timer expires, or wait for background process reactive wakeup.
 
-### Push-back instead of polling (Claude Code): `run_in_background`
+### Universal background wait pattern: push-back instead of polling
 
-Claude Code's own `Bash` tool has a `run_in_background: true` mode: it detaches the command and
-**automatically re-invokes the calling session the moment that command's process exits** — no
-manual polling, no tight loop, and no need for the user to ask "is it done yet." When the caller
-genuinely has nothing else to do while a job runs (the common case for a single-job dispatch with
-no parallel workstream), prefer this over both tight-loop `status`/`result` polling and a foreground
-blocking call:
+Every orchestrator with background shell capability can turn `wait` into a real completion
+callback: launch the command in the background and the runner re-invokes the session when its
+process exits, so no orchestrator turn is spent polling. Claude Code's `Bash` tool does this with
+`run_in_background: true`; Antigravity/Gemini do it with a background `run_command` task plus
+reactive wakeup; any runner that can detach a shell and notify on exit behaves the same way. Reach
+for it whenever the caller genuinely has nothing else to do while the jobs run.
 
 ```sh
-# from Claude Code's Bash tool, with run_in_background: true
-node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId> --timeout-ms 1800000
+# Run in background (run_in_background: true / background command):
+for j in <jobId1> <jobId2>; do
+  node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait $j --timeout-ms 3600000 2>&1 \
+    | sed -n '/--- result ---/,$p' \
+    | cut -c1-2600 \
+    | head -50
+done
 ```
 
-`wait` already polls internally at a sane interval and blocks until the job settles, so wrapping it
-in a backgrounded shell exec turns that one blocking call into a real completion callback: the shell
-process (not the whole session) blocks on it, control returns immediately after dispatch, and the
-harness delivers the finished `wait` output back to the session unprompted when it exits.
+Why this shape:
 
-This is **Claude-Code-specific** — the `run_in_background` re-invoke mechanism is a Claude Code
-harness feature, not something the DeepSeek Harness or the MCP bridge itself provides. Other MCP
-clients following this skill (Gemini, Codex) should keep using the non-blocking `start` + periodic
-`result` pattern above, since they have no equivalent callback.
+1. **Zero Assistant Turns**: runs entirely in the background shell until the jobs settle, triggering
+   a single reactive wakeup on completion instead of wasting turns polling
+   `manage_task(status ...)` or `result`.
+2. **Filters Heartbeat Noise**: `sed -n '/--- result ---/,$p'` strips the intermediate
+   `waiting running 15s...` progress messages, delivering only the clean deliverable.
+3. **Guards Against Context Inflation**: `cut -c1-2600 | head -50` bounds line length and line
+   count, protecting the context window.
+4. **Supports Parallel Fan-Out**: the `for j in ...` loop waits on multiple concurrent jobs
+   sequentially within a single background process, aggregating results cleanly.
+5. **Runner-Agnostic**: this works across agent runners with background shell capabilities — Claude
+   Code (`run_in_background: true`), Antigravity/Gemini (`run_command` background tasks with
+   reactive wakeup), and equivalents — not just Claude Code. The DeepSeek Harness and the MCP
+   bridge only supply the blocking `wait` being wrapped; the callback comes from the runner.
 
 Still prefer plain fire-and-forget `start` (no `wait` at all) when there **is** other orchestrator
 work to do meanwhile — see "Non-blocking dispatch" in the project `AGENTS.md` §7. Reach for the
@@ -270,7 +282,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `window` | Reports whether DeepSeek pricing is peak or off-peak right now, and when it next flips — see "Off-peak planning" below. | `0` |
 | `start` | Writes the job, spawns the worker, waits up to `--wait-session-ms` (default 25000) for a session id. The prompt comes from the positional argument, from `--prompt-file FILE` / `-f FILE`, or from stdin (`-`, or no prompt argument on a non-interactive stdin); use the file/stdin forms for anything multi-line. `--detach` returns instantly. `--read-only` pins the job to the Harness's read-only file policy, so it cannot modify a file; `--allow-git-write` lifts the git write guard instead, and the two are mutually exclusive. `--defer-to-off-peak`: if pricing is currently peak, the worker sleeps until off-peak before it does anything else (job sits in `state: scheduled`, cancelable the whole time); a no-op if already off-peak. | `0` |
 | `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
-| `result` | Final report text. | `0` done, `1` error, `2` still running |
+| `result` | Final report text, then the deterministic failure-triage block when the job ended in error (a code rule matches the recorded error and names the next step; it never resumes anything). `--json` carries the structured result. | `0` done, `1` error, `2` still running |
 | `guard` | The job's git write guard state, plus any refs a guarded push landed in the sandbox instead of the real remote. | `0` |
 | `update` | Relays new information to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
@@ -280,10 +292,15 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
 
-Every command accepts `--json`. Other flags: `--cwd DIR` (absolute), `--mcp-config FILE`,
-`--prompt-file FILE` / `-f FILE` (for `start`), `--label NAME`, `--permission allow|reject`,
-`--allow-git-write`, `--read-only`, `--timeout-ms N`,
-`--detach`, `--wait-session-ms N`, `--all`, `--log`, `--defer-to-off-peak`, `--tz IANA_NAME` (for `window`).
+Every command accepts `--json`. Flags by command: `--cwd DIR` (start, resume, sessions),
+`--mcp-config FILE` (start, resume, mcp-servers), `--label NAME` and `--timeout-ms N`
+(start, resume; `wait` takes `--timeout-ms` too), `--read-only` / `--allow-git-write`
+(start, resume), `--session ID` (resume), `--prompt-file FILE` / `-f FILE`,
+`--permission allow|reject`, `--detach`, `--wait-session-ms N`, and `--defer-to-off-peak`
+(start only), `--all` (list, sync-workspace), `--dry-run` and `--wait-ms N`
+(sync-workspace), `--log` (status), and `--tz IANA_NAME` (window). Any other flag is
+rejected with `` unknown flag --X for `<command>` ``; the per-command list lives in
+`scripts/lib/cli-flags.mjs`.
 
 Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
 shows for it: an idle row under the project folder, never live progress. Jobs are detached: they keep running after the launching session ends.
@@ -456,3 +473,4 @@ original session in the GUI.
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.
 - [../../mcp-deepseek/git-guard.cjs](../../mcp-deepseek/git-guard.cjs) — the git write guard the bridge installs before spawning a job.
 - [../../mcp-deepseek/README.md](../../mcp-deepseek/README.md) — bridge setup and env vars.
+- [scripts/lib/](scripts/lib/) — shared helpers the runner imports: `prompt-file.mjs` (resolve a `--prompt-file` work order) and `triage.mjs` (the deterministic failure-triage rules).

@@ -18,7 +18,8 @@ Investigation and diagnosis jobs: pass `--read-only` to `start`.
 Fan-out: independent domain-scoped work becomes one job per role in scope, never one per file. The
 orchestrator still does synthesis, conflict resolution, review and sign-off.
 
-Review every worker diff before reporting done; workers never commit or push.
+Review every worker diff before reporting done; workers never commit or push. Read the diff
+yourself and sign off — a passing test run is not a substitute for reading the change.
 
 If this project defines Claude subagents (.claude/agents/*) or an agent roster in its docs, treat
 those roles as the `--label` / brief for a DeepSeek job, not as a reason to do the work in Claude's

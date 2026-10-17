@@ -1228,6 +1228,7 @@ function projectLinks(project) {
     entry(path.join('scripts', 'dsh-offload.mjs')),
     entry(path.join('scripts', 'deepseek-offload.mjs')),
     entry(path.join('scripts', 'session-tail.mjs')),
+    entry(path.join('scripts', 'lib')),
     entry('references'),
   ]
 }

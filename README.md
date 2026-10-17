@@ -50,9 +50,12 @@ You do not need to read every piece; this table maps each path to the role it pl
 | [`.agents/mcp-deepseek/`](.agents/mcp-deepseek/README.md) | The MCP bridge: a zero-dependency stdio server (`server.cjs`) that speaks MCP to the calling client and ACP to a spawned `dsh --profile acp`. Can forward the caller's own MCP servers into the child session. Its git write guard (`git-guard.cjs`) refuses the job's commits and pushes. |
 | [`.agents/skills/deepseek-offload/`](.agents/skills/deepseek-offload/SKILL.md) | The skill doc for the calling agent: when to offload, the blocking MCP path vs. fire-and-forget background jobs, prompt contracts, safety rules, troubleshooting. |
 | [`.agents/dsh-workspace-attach/`](.agents/dsh-workspace-attach/README.md) | DSH web-profile plugin that files delegated sessions under the project folder they ran in. |
-| [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, optional vision subagent, then `doctor`. `--update` fast-forwards the package and replaces stale project entries ([Updating an existing project](INSTALL.md#updating-an-existing-project)). `--dry-run`, `--uninstall`, `--json`. |
+| [`install.sh`](install.sh) | Idempotent installer: Harness profiles, project MCP config, the bridge/guard/plugin/skill links, optional vision subagent, then `doctor`. `--update` fast-forwards the package and replaces stale project entries ([Updating an existing project](INSTALL.md#updating-an-existing-project)). `--dry-run`, `--uninstall`, `--json`. |
 | [`INSTALL.md`](INSTALL.md) | The install procedure written for an AI agent to execute for a human: recon, install, verify, smoke test, failure playbook, report template. |
 | [`harness/`](harness/README.md) | The Harness-side changes that make all of this work, as reviewable files and a patch. |
+
+`scripts/lib/` holds the shared helpers the runner imports: `prompt-file.mjs` resolves a
+`--prompt-file` / `-f` work order, and `triage.mjs` carries the deterministic failure-triage rules.
 
 ## Requirements
 
@@ -134,24 +137,33 @@ the project's `CLAUDE.md`/`AGENTS.md`, so the rule lives in the project's own in
 ```sh
 node "$R" doctor                        health check, including workspace grouping, resume
                                         support, and stale project entries
-node "$R" start "<prompt>" [--prompt-file FILE] [--cwd DIR] [--label NAME]
-                           [--mcp-config FILE] [--permission allow|reject]
-                           [--timeout-ms N] [--defer-to-off-peak] [--detach]
-                           [--json]
-node "$R" wait   <jobId>                print the header, then block until the job settles
+node "$R" start "<prompt>" [--prompt-file FILE] [-f FILE] [--cwd DIR]
+                           [--label NAME] [--mcp-config FILE]
+                           [--permission allow|reject] [--timeout-ms N]
+                           [--defer-to-off-peak] [--detach] [--read-only]
+                           [--allow-git-write] [--wait-session-ms N] [--json]
+node "$R" wait   <jobId> [--timeout-ms N] [--json]
+                                        print the header, then block until the job settles
 node "$R" update <jobId> "<new info>"   steer a running job
 node "$R" cancel <jobId>                stop it outright
 node "$R" resume <jobId> ["<extra>"]    continue an interrupted job's session in a new job
-                                        (--session ID --cwd DIR for a session with no job)
-node "$R" list   [--all]                recent jobs
-node "$R" sessions [--cwd DIR]          sessions in the shared DSH store
-node "$R" sync-workspace [--all]        file old sessions under their project folder
-node "$R" window                        DeepSeek peak/off-peak pricing window
+                                        (--session ID --cwd DIR for a session with no job;
+                                        also --label NAME --timeout-ms N --mcp-config FILE,
+                                        --read-only, --allow-git-write, --json)
+node "$R" list   [--all] [--json]       recent jobs
+node "$R" sessions [--cwd DIR] [--json] sessions in the shared DSH store
+node "$R" sync-workspace [--all] [--dry-run] [--wait-ms N] [--json]
+                                        file old sessions under their project folder
+node "$R" window [--tz IANA] [--json]   DeepSeek peak/off-peak pricing window
 ```
 
 Prompts must be self-contained: a job gets a fresh session that cannot see your conversation and
 cannot ask you questions. A prompt of `-` reads the task from stdin; `--prompt-file FILE` (`-f FILE`)
 reads it from a file, which avoids shell backtick expansion.
+
+When a job ends in `error`, `result` and `wait` append a deterministic failure-triage block: a code
+rule matches the recorded error and prints the next step (resume, fix the environment, retry). It
+only advises; it never resumes a job.
 
 ## Why jobs land under a project folder (and used to land in "Ungrouped")
 
@@ -242,15 +254,17 @@ Bridge and runner environment (all optional):
 | `session/new` fails with a bare `Internal error` | A forwarded MCP server failed to start (DSH does not name it): run `mcp-servers --mcp-config <file>`. |
 | `references unset environment variable X` | A forwarded server's config uses `${X}` and the bridge's environment lacks it. |
 | `dsh --profile acp exited with code …` | The `acp` profile cannot initialize: run `dsh --profile acp --dump-config` and read the error. |
+| A job error carrying `EROFS` / `EACCES` / `permission denied` | The failure-triage block classifies it as an `environment` failure (code rule, no key needed): fix the path/permissions, then `resume`. |
 
 ## Tests
 
 ```sh
-node --test tests/install.test.mjs .agents/dsh-workspace-attach/tests/adopt.test.js .agents/dsh-workspace-attach/tests/inbox.test.js
+npm test
 ```
 
-Covers the installer's profile-patch text surgery (fenced rows, replacing an unmanaged row,
-restoring a valid empty patch file) and the plugin's adoption and inbox protocol.
+`npm test` runs `node --test` over nine files: `tests/install.test.mjs`, `session-tail`,
+`git-guard`, `bridge-guard`, `read-only`, `prompt-file`, `resume`, and the workspace-attach
+plugin's `adopt` and `inbox` tests.
 
 ## License
 
