@@ -437,6 +437,34 @@ function startWorkspaceAttach(sessionId, cwd) {
 }
 
 // ---------------------------------------------------------------------------
+// Fork overlays
+// ---------------------------------------------------------------------------
+/**
+ * Overlay files that load the Harness checkout's fork-only plugins
+ * (`<DSH_ROOT>/fork/<plugin>/<plugin>.overlay.yml`) into each ACP child, so the
+ * child publishes live Assistant frames and accepts control-inbox steering.
+ * `DSH_OFFLOAD_FORK_OVERLAYS=0` turns this off; a Harness without a `fork/`
+ * directory yields none.
+ * @returns absolute overlay paths in directory order.
+ */
+function forkOverlays() {
+  if (process.env.DSH_OFFLOAD_FORK_OVERLAYS === '0') return []
+  const forkDir = path.join(DSH_ROOT, 'fork')
+  let entries
+  try {
+    entries = fs.readdirSync(forkDir, { withFileTypes: true })
+  } catch (error) {
+    if (error.code === 'ENOENT') return []
+    throw error
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(forkDir, entry.name, `${entry.name}.overlay.yml`))
+    .filter((file) => fs.existsSync(file))
+    .sort()
+}
+
+// ---------------------------------------------------------------------------
 // File policy (read-only delegation)
 // ---------------------------------------------------------------------------
 /**
@@ -564,7 +592,8 @@ class AcpClient {
     // Read-only is applied as a late `--patch` overlay rather than an
     // environment default, so a profile that pins sandbox-policy cannot win.
     const readOnlyPatch = readOnlyRequested() ? ensureReadOnlyPatch() : null
-    const args = readOnlyPatch === null ? launch.args : [...launch.args, '--patch', readOnlyPatch]
+    const patches = [...forkOverlays(), ...(readOnlyPatch === null ? [] : [readOnlyPatch])]
+    const args = [...launch.args, ...patches.flatMap((patch) => ['--patch', patch])]
     const nodeDir = path.dirname(launch.command)
     const envPath = nodeDir && nodeDir !== '.' ? `${nodeDir}:${process.env.PATH || ''}` : process.env.PATH
     this.child = spawn(launch.command, args, {
