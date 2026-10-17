@@ -16,6 +16,12 @@ released GUI cannot show it running or stream it — follow a live run with
 `.agents/skills/deepseek-offload/scripts/session-tail.mjs <jobId> --watch`, which prints the job's
 Assistant text on a Harness that publishes it, and its activity lines otherwise.
 
+A Harness checkout with the `fork/` plugins (`live-sync`, `job-control`) also lets you steer a running
+job and read its token usage: `.agents/skills/deepseek-offload/scripts/session-steer.mjs <jobId> "text"`
+queues a message for the job's next step, and `... <jobId> --usage` prints the usage snapshot. The bridge
+adds every `<DSH_ROOT>/fork/<name>/<name>.overlay.yml` to the ACP child automatically; set
+`DSH_OFFLOAD_FORK_OVERLAYS=0` to disable that.
+
 ## Key terms
 
 - **MCP** — the protocol an AI client uses to call external tools; the calling agent reaches this

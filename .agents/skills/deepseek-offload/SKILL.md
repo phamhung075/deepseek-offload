@@ -71,6 +71,17 @@ Report those progress lines to the user: a released GUI cannot give them. A Harn
 foreign Session as running from its writes, and its follow stream reads the child's appends and that
 same frame channel — but `session-tail.mjs` still works when no GUI is open at all.
 
+**Steering and usage (needs the Harness `fork/job-control` plugin).** The bridge loads `fork/*` overlays
+into each ACP child unless `DSH_OFFLOAD_FORK_OVERLAYS=0`. Then:
+
+```bash
+STEER=.agents/skills/deepseek-offload/scripts/session-steer.mjs
+node "$STEER" <jobId> "also cover the retry path"   # delivered at the job's next step
+node "$STEER" <jobId> --usage                       # tokens held by the job (after its last reply)
+```
+
+Without the plugin the message is written but never read, and `--usage` finds no snapshot.
+
 > [!IMPORTANT]
 > **Token Economics: Never Poll or Tail in Tight Loops**
 > Do NOT repeatedly invoke `session-tail.mjs`, `status`, or `result` in tight consecutive tool loops. Each
