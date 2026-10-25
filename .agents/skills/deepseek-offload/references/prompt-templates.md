@@ -93,9 +93,16 @@ node "$OFF" start "<workstream 1 prompt>" --cwd "$PWD" --label ws1
 node "$OFF" start "<workstream 2 prompt>" --cwd "$PWD" --label ws2
 node "$OFF" start "<workstream 3 prompt>" --cwd "$PWD" --label ws3
 node "$OFF" list
-node "$OFF" wait <jobId-1> --json
-node "$OFF" wait <jobId-2> --json
-node "$OFF" wait <jobId-3> --json
+```
+
+Then collect with **one backgrounded `wait` per job** (three separate background commands, sent in
+one turn), never one loop or chain over all three: a combined waiter reports only when the slowest
+job ends, so a finished job goes unnoticed (SKILL.md, "Universal background wait pattern").
+
+```sh
+node "$OFF" wait <jobId-1> --json   # background command 1
+node "$OFF" wait <jobId-2> --json   # background command 2
+node "$OFF" wait <jobId-3> --json   # background command 3
 ```
 
 Keep the workstreams genuinely independent (different directories or different questions). If two

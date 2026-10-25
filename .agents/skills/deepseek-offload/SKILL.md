@@ -104,31 +104,42 @@ process exits, so no orchestrator turn is spent polling. Claude Code's `Bash` to
 reactive wakeup; any runner that can detach a shell and notify on exit behaves the same way. Reach
 for it whenever the caller genuinely has nothing else to do while the jobs run.
 
+> [!IMPORTANT]
+> **One background waiter per job. Never wait on several jobs in one background command.**
+> The runner notifies the session only when the background *process* exits. A
+> `for j in job1 job2; do wait $j; done` loop exits only after the **last** job settles, so a job
+> that finished first sits unreported: the orchestrator does not notice it, and the user has to ask
+> (observed 2026-10-25: an install-path job finished at 3 min, unnoticed while the same loop waited
+> on a 40-min job). Start one backgrounded `wait` per job, in the same turn, and each completion
+> wakes the session as it happens.
+
 ```sh
-# Run in background (run_in_background: true / background command):
-for j in <jobId1> <jobId2>; do
-  node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait $j --timeout-ms 3600000 2>&1 \
-    | sed -n '/--- result ---/,$p' \
-    | cut -c1-2600 \
-    | head -50
-done
+# One background command PER job (run_in_background: true / background command), all sent in one turn:
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId1> --timeout-ms 3600000 2>&1 \
+  | sed -n '/--- result ---/,$p' | cut -c1-2600 | head -50
+# ...and a second, separate background command:
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId2> --timeout-ms 3600000 2>&1 \
+  | sed -n '/--- result ---/,$p' | cut -c1-2600 | head -50
 ```
 
 Why this shape:
 
-1. **Zero Assistant Turns**: runs entirely in the background shell until the jobs settle, triggering
-   a single reactive wakeup on completion instead of wasting turns polling
+1. **Zero Assistant Turns**: each waiter runs entirely in the background shell until its job
+   settles, triggering one reactive wakeup per job instead of wasting turns polling
    `manage_task(status ...)` or `result`.
 2. **Filters Heartbeat Noise**: `sed -n '/--- result ---/,$p'` strips the intermediate
    `waiting running 15s...` progress messages, delivering only the clean deliverable.
 3. **Guards Against Context Inflation**: `cut -c1-2600 | head -50` bounds line length and line
    count, protecting the context window.
-4. **Supports Parallel Fan-Out**: the `for j in ...` loop waits on multiple concurrent jobs
-   sequentially within a single background process, aggregating results cleanly.
+4. **Parallel Fan-Out without blind spots**: one waiter per job means every job reports the moment
+   it settles; a short job is never hidden behind a long one. Act on each result as it arrives (review
+   its diff, start the dependent step) instead of holding it until the slowest job ends.
 5. **Runner-Agnostic**: this works across agent runners with background shell capabilities — Claude
    Code (`run_in_background: true`), Antigravity/Gemini (`run_command` background tasks with
    reactive wakeup), and equivalents — not just Claude Code. The DeepSeek Harness and the MCP
    bridge only supply the blocking `wait` being wrapped; the callback comes from the runner.
+6. **Every `start` gets its waiter**: when a job is started later in the session, start its own
+   backgrounded `wait` in the same turn. Never extend or reuse an existing waiter for a new job.
 
 Still prefer plain fire-and-forget `start` (no `wait` at all) when there **is** other orchestrator
 work to do meanwhile — see "Non-blocking dispatch" in the project `AGENTS.md` §7. Reach for the
