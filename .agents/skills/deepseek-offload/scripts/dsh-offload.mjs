@@ -46,6 +46,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
 import { resolvePromptFile } from './lib/prompt-file.mjs'
+import { jobSocketPath } from './lib/job-socket.mjs'
 import { triageJob, renderTriageBlock } from './lib/triage.mjs'
 
 // ---------------------------------------------------------------------------
@@ -115,8 +116,16 @@ function workerLogFile(jobId) {
   return path.join(JOBS_DIR, `${jobId}.worker.log`)
 }
 
-function jobSocketFile(jobId) {
-  return path.join(JOBS_DIR, `${jobId}.sock`)
+/**
+ * The update socket of a job: the path its worker recorded, else the path a
+ * worker of this version would pick (next to the job record when it fits
+ * `sun_path`, else a short private directory; see lib/job-socket.mjs).
+ * @param jobId - the job id.
+ * @param job - the job record, when the caller already read it.
+ */
+function jobSocketFile(jobId, job) {
+  if (job && typeof job.socketPath === 'string' && job.socketPath !== '') return job.socketPath
+  return jobSocketPath(JOBS_DIR, jobId)
 }
 
 function writeJsonAtomic(file, value) {
@@ -674,7 +683,15 @@ async function awaitWorkspaceResults(sessionIds, timeoutMs) {
  */
 function startUpdateSocket(jobId, bridge) {
   return new Promise((resolve, reject) => {
-    const sockPath = jobSocketFile(jobId)
+    let sockPath
+    try {
+      sockPath = jobSocketFile(jobId)
+      // Recorded before listen, so `update` and `cancel` reach a socket that had to move.
+      updateJob(jobId, { socketPath: sockPath })
+    } catch (error) {
+      reject(error)
+      return
+    }
     const server = net.createServer((socket) => {
       socket.setEncoding('utf8')
       let buffer = ''
@@ -937,13 +954,15 @@ async function runWorker(jobId) {
     }
     return 1
   } finally {
+    let sockPath
     if (updateServer !== undefined) {
+      sockPath = updateServer.address()
       updateServer.close()
       updateServer.unref()
     }
     if (bridge !== undefined) await bridge.dispose()
     try {
-      fs.unlinkSync(jobSocketFile(jobId))
+      if (typeof sockPath === 'string') fs.unlinkSync(sockPath)
     } catch {
       /* the socket file is already gone */
     }
@@ -1358,7 +1377,7 @@ async function commandUpdate(positional, flags) {
 
   let response
   try {
-    response = await sendSocketRequest(jobSocketFile(jobId), { message })
+    response = await sendSocketRequest(jobSocketFile(jobId, job), { message })
   } catch (error) {
     const detail = error && error.message ? error.message : String(error)
     if (flags.json === true) {
@@ -1445,7 +1464,7 @@ async function commandCancel(positional, flags) {
   let graceful = false
   let gracefulError = null
   try {
-    const response = await sendSocketRequest(jobSocketFile(jobId), { cancel: true })
+    const response = await sendSocketRequest(jobSocketFile(jobId, job), { cancel: true })
     graceful = response.ok === true
     if (!graceful) gracefulError = response.error || 'unknown error'
   } catch (error) {
@@ -1474,7 +1493,7 @@ async function commandCancel(positional, flags) {
   if (typeof job.pid === 'number') await forceKillWorkerTree(job.pid)
   updateJob(jobId, { state: 'cancelled', error: null, finishedAt: Date.now() })
   try {
-    fs.unlinkSync(jobSocketFile(jobId))
+    fs.unlinkSync(jobSocketFile(jobId, job))
   } catch {
     /* already gone */
   }
