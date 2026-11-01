@@ -66,7 +66,9 @@ node "$TAIL" <jobId> --lines 20    # newest tool calls, steps and messages
 node "$TAIL" <jobId> --watch       # stream Assistant text until the job settles, then print state
 ```
 
-Report those progress lines to the user: a released GUI cannot give them. A Harness built from the
+These lines are for diagnosing a job past its time box or one that looks stuck. Do not read them to follow a
+healthy job and do not relay them to the user or into an orchestrator's context: wait for the completion notice
+(below) and report the result. A Harness built from the
 `deepseek-offload` branch (2026-09-16+) drops the last two limitations above — its list reports a
 foreign Session as running from its writes, and its follow stream reads the child's appends and that
 same frame channel — but `session-tail.mjs` still works when no GUI is open at all.
@@ -93,7 +95,8 @@ Without the plugin the message is written but never read, and `--usage` finds no
 >    - Full multi-increment worker run: ~5–10 minutes.
 > 2. **Set a timer to wait**: Use the orchestrator's `schedule` tool with `DurationSeconds=<estimated_seconds>`
 >    (or `wait --timeout-ms <N>`) and conclude your turn so the model sleeps until the timer fires.
-> 3. Check progress only after the timer expires, or wait for background process reactive wakeup.
+> 3. Read the result when the background process wakes you or the timer expires; do not read job detail to
+>    follow a healthy job.
 
 ### Universal background wait pattern: push-back instead of polling
 
@@ -101,8 +104,8 @@ Every orchestrator with background shell capability can turn `wait` into a real 
 callback: launch the command in the background and the runner re-invokes the session when its
 process exits, so no orchestrator turn is spent polling. Claude Code's `Bash` tool does this with
 `run_in_background: true`; Antigravity/Gemini do it with a background `run_command` task plus
-reactive wakeup; any runner that can detach a shell and notify on exit behaves the same way. Reach
-for it whenever the caller genuinely has nothing else to do while the jobs run.
+reactive wakeup; any runner that can detach a shell and notify on exit behaves the same way. Use
+it for every job, whether or not the caller has other work while the job runs.
 
 > [!IMPORTANT]
 > **One background waiter per job. Never wait on several jobs in one background command.**
@@ -324,15 +327,16 @@ Every command accepts `--json`. Flags by command: `--cwd DIR` (start, resume, se
 rejected with `` unknown flag --X for `<command>` ``; the per-command list lives in
 `scripts/lib/cli-flags.mjs`.
 
-Report the `session` id from `start`/`status` to the user verbatim, together with what the GUI
-shows for it: an idle row under the project folder, never live progress. Jobs are detached: they keep running after the launching session ends.
+Do not send the user a status line when a job starts. The `session` id from `start`/`status` goes in the
+final report, verbatim, when the user may need it; the GUI shows it as an idle row under the project folder,
+never live progress. Jobs are detached: they keep running after the launching session ends.
 
 **Token Economics Warning for Following Jobs:**
 Do NOT continuously invoke `session-tail.mjs`, `status`, or `wait` across back-to-back assistant turns. Polling every few seconds burns excessive tokens in context.
 Instead:
 - **Estimate duration**: Think through the computational cost (e.g., Rust compilation: ~1–2 min, benchmark test suite: ~2–3 min, worker implementation & refactoring: ~5–10 min).
 - **Set a timer**: Call `schedule` with `DurationSeconds=<seconds>` and end your turn to sleep until notified.
-- **Inspect**: Run `result <jobId>` or `session-tail.mjs` only after the timer fires.
+- **Inspect**: Run `result <jobId>` after the completion notice or the timer; `session-tail.mjs` only to diagnose a job past its time box.
 
 **Parallel fan-out:** start one job per independent workstream, then `wait` on each. Session ids
 are attributed by diffing the session list against pre-existing ids, so concurrent jobs don't
