@@ -207,6 +207,48 @@ test('DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 lifts the guard for a job that must write',
   assert.match(text, /^GitWrites: ALLOWED — DEEPSEEK_MCP_ALLOW_GIT_WRITE=1/m)
 })
 
+/** Add a linked worktree to the fixture, returning the fixture aimed at it. */
+function linkedWorktree(fx) {
+  const worktree = path.join(fx.root, 'linked')
+  mustGit(fx.repo, ['worktree', 'add', '--quiet', '-b', 'job', worktree])
+  return { ...fx, repo: worktree, gitRoot: fs.realpathSync(path.join(fx.repo, '.git')) }
+}
+
+/** The overlay paths the stub child was launched with. */
+function patchesOf(fx) {
+  const { argv } = JSON.parse(fs.readFileSync(fx.report, 'utf8'))
+  return argv.flatMap((arg, index) => (arg === '--patch' ? [argv[index + 1]] : []))
+}
+
+test('a job allowed to write history in a linked worktree gets its git directory as a writable root', async () => {
+  const fx = linkedWorktree(fixture('worktree'))
+  const text = await callAgent(fx, { DEEPSEEK_MCP_ALLOW_GIT_WRITE: '1', DSH_OFFLOAD_FORK_OVERLAYS: '0' })
+
+  const patches = patchesOf(fx)
+  assert.equal(patches.length, 1)
+  assert.match(path.basename(patches[0]), /^offload-git-roots-[0-9a-f]{16}\.cordis\.yml$/)
+  const overlay = fs.readFileSync(patches[0], 'utf8')
+  assert.match(overlay, /- id: sandbox-policy/)
+  assert.match(overlay, /mode: !!js process\.env\.DSH_PERMISSION_MODE \?\? 'workspace-write'/)
+  assert.match(overlay, /workspaceRoot: !!js process\.cwd\(\)/)
+  // The common directory holds the worktree's own, so it is the one grant.
+  assert.ok(overlay.includes(`extraWritableRoots: ${JSON.stringify([fx.gitRoot])}`), overlay)
+  assert.ok(text.includes(`plus the git directory ${fx.gitRoot}`), text)
+})
+
+test('a guarded job in a linked worktree gets no git directory grant', async () => {
+  const fx = linkedWorktree(fixture('worktree-guarded'))
+  const text = await callAgent(fx, { DSH_OFFLOAD_FORK_OVERLAYS: '0' })
+  assert.deepEqual(patchesOf(fx), [])
+  assert.doesNotMatch(text, /plus the git directory/)
+})
+
+test('a job in a main checkout needs no git directory grant', async () => {
+  const fx = fixture('main-checkout')
+  await callAgent(fx, { DEEPSEEK_MCP_ALLOW_GIT_WRITE: '1', DSH_OFFLOAD_FORK_OVERLAYS: '0' })
+  assert.deepEqual(patchesOf(fx), [])
+})
+
 test('DEEPSEEK_MCP_READ_ONLY=1 pins the job through a --patch overlay', async () => {
   const fx = fixture('readonly')
   const text = await callAgent(fx, { DEEPSEEK_MCP_READ_ONLY: '1' })

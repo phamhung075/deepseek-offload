@@ -23,6 +23,7 @@
  */
 
 const { spawn, spawnSync } = require('node:child_process')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -510,16 +511,72 @@ function ensureReadOnlyPatch() {
 }
 
 /**
+ * The git directories a commit in `cwd` writes to that sit outside `cwd`. A
+ * linked worktree keeps its index and HEAD under `<repo>/.git/worktrees/<name>`
+ * and its objects and refs under `<repo>/.git`, so workspace-write alone denies
+ * the commit with EROFS. Only a job allowed to write history gets them.
+ * @param cwd - the job's working directory.
+ * @returns absolute directories, empty when none is needed or `cwd` is no repository.
+ */
+function gitRootsOutside(cwd) {
+  if (readOnlyRequested() || !gitWritesAllowed()) return []
+  const out = spawnSync('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], { encoding: 'utf8' })
+  if (out.status !== 0) return []
+  const under = (child, parent) => child === parent || child.startsWith(`${parent}${path.sep}`)
+  const workspace = fs.realpathSync(cwd)
+  const dirs = [...new Set(out.stdout.split('\n').filter(Boolean).map((dir) => fs.realpathSync(dir)))]
+    .filter((dir) => !under(dir, workspace))
+  return dirs.filter((dir) => !dirs.some((other) => other !== dir && under(dir, other)))
+}
+
+/**
+ * Write the overlay granting `roots` to the sandbox policy, and return its path.
+ * The name follows the content and the file is replaced by rename, so a running
+ * job's overlay is never touched and parallel jobs cannot read a partial file.
+ * The row's whole `config` is restated because a patch replaces that value.
+ * @param roots - absolute directories, from {@link gitRootsOutside}.
+ * @returns the overlay path, or null when it could not be written.
+ */
+function ensureGitRootsPatch(roots) {
+  const source = '# Written by deepseek-mcp for a job allowed to write git history whose git\n'
+    + '# directory lies outside its workspace (a linked worktree).\n'
+    + '- id: sandbox-policy\n'
+    + '  config:\n'
+    + "    mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'\n"
+    + '    workspaceRoot: !!js process.cwd()\n'
+    + `    extraWritableRoots: ${JSON.stringify(roots)}\n`
+  const digest = crypto.createHash('sha256').update(source).digest('hex').slice(0, 16)
+  const file = path.join(DSH_HOME, `offload-git-roots-${digest}.cordis.yml`)
+  try {
+    if (fs.existsSync(file)) return file
+    fs.mkdirSync(DSH_HOME, { recursive: true })
+    const temporary = `${file}.${process.pid}.tmp`
+    fs.writeFileSync(temporary, source)
+    fs.renameSync(temporary, file)
+    return file
+  } catch (error) {
+    log(`git roots overlay could not be written: ${error.message}`)
+    return null
+  }
+}
+
+/**
  * The result line describing the file policy this job runs under, so a caller
  * never has to assume whether writes were possible.
+ * @param gitRootsPatch - the job's git roots overlay, if it has one.
+ * @param gitRoots - the directories that overlay grants.
  * @returns one line, always present.
  */
-function describeFilePolicy() {
+function describeFilePolicy(gitRootsPatch = null, gitRoots = []) {
   if (!readOnlyRequested()) {
     const inherited = process.env.DSH_PERMISSION_MODE
-    return inherited === undefined || inherited === ''
+    const base = inherited === undefined || inherited === ''
       ? 'FilePolicy: deployment default (workspace-write on a base-backed profile) — file mutations are confined to the session workspace'
       : `FilePolicy: ${inherited} (inherited DSH_PERMISSION_MODE)`
+    if (gitRoots.length === 0) return base
+    return gitRootsPatch === null
+      ? `${base}; git directory ${gitRoots.join(', ')} is outside it and its overlay could not be written, so commits will be denied`
+      : `${base}, plus the git directory ${gitRoots.join(', ')}`
   }
   const patch = ensureReadOnlyPatch()
   return patch === null
@@ -592,7 +649,7 @@ class AcpClient {
     // Read-only is applied as a late `--patch` overlay rather than an
     // environment default, so a profile that pins sandbox-policy cannot win.
     const readOnlyPatch = readOnlyRequested() ? ensureReadOnlyPatch() : null
-    const patches = [...forkOverlays(), ...(readOnlyPatch === null ? [] : [readOnlyPatch])]
+    const patches = [...forkOverlays(), ...(readOnlyPatch === null ? [] : [readOnlyPatch]), ...(options.patches ?? [])]
     const args = [...launch.args, ...patches.flatMap((patch) => ['--patch', patch])]
     const nodeDir = path.dirname(launch.command)
     const envPath = nodeDir && nodeDir !== '.' ? `${nodeDir}:${process.env.PATH || ''}` : process.env.PATH
@@ -750,7 +807,9 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, r
   // Resolved before the child spawns: installing the guard here is what puts it
   // in the job's environment, so it must not move inside the callback.
   const gitWrites = describeGitWrites()
-  const filePolicy = describeFilePolicy()
+  const gitRoots = gitRootsOutside(cwd)
+  const gitRootsPatch = gitRoots.length === 0 ? null : ensureGitRootsPatch(gitRoots)
+  const filePolicy = describeFilePolicy(gitRootsPatch, gitRoots)
   return withAcp(PERMISSION, async (client) => {
     client.onText = (text) => { if (onProgress) onProgress(text) }
 
@@ -825,7 +884,7 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, r
       gitWrites,
       filePolicy,
     }
-  }, { env: guardEnvironment(ensureGitGuard()) })
+  }, { env: guardEnvironment(ensureGitGuard()), patches: gitRootsPatch === null ? [] : [gitRootsPatch] })
 }
 
 async function listSessions({ cwd }) {

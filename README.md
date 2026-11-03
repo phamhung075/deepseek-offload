@@ -215,7 +215,8 @@ predates the plugin.
   cannot reach the real remote. Your global git config is read first, so identity and aliases still
   work, and nothing is written into your repository. The result reports the state on a `GitWrites:`
   line; `dsh-offload.mjs guard <jobId>` shows anything the job pushed. A job whose task genuinely
-  must write history needs `--allow-git-write` (or `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1`).
+  must write history needs `--allow-git-write` (or `DEEPSEEK_MCP_ALLOW_GIT_WRITE=1`). In a linked
+  worktree, that also adds the worktree's git directory to the sandbox's writable roots.
 - **Forwarded MCP servers act with your credentials.** Forward the narrowest config that does the
   job; `${VAR}` references are expanded from the bridge's environment, so the secrets stay in the
   environment and never in the package.
