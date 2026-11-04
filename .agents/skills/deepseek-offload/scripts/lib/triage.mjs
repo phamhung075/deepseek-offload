@@ -29,6 +29,14 @@ export const TRIAGE_RULES = [
     advice: ({ jobId }) => `dsh-offload resume ${jobId}`,
   },
   {
+    // Before the general timeout rule: a longer job timeout does not help a boot.
+    pattern: /ACP request timed out after \d+ms: initialize/i,
+    kind: 'boot',
+    advice: ({ jobId, job }) => (job?.sessionId
+      ? `dsh never booted, the machine was too busy; no turn ran. dsh-offload resume ${jobId}`
+      : 'dsh never booted, the machine was too busy; no session exists. Start the job again'),
+  },
+  {
     pattern: /ACP request timed out/i,
     kind: 'timeout',
     advice: ({ jobId, job, env }) => `dsh-offload resume ${jobId} --timeout-ms ${2 * timeoutMsFor(job, env)}`,

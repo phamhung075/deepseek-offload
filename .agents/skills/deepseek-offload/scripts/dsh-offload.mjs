@@ -86,6 +86,10 @@ function followCommand(jobId) {
   return `node ${shown} ${jobId} --watch`
 }
 const SESSION_DISCOVERY_TIMEOUT_MS = 90_000
+// A bridge call that boots the ACP child may repeat that boot (three attempts of
+// 120 s by default), so its deadline here has to outlast them all. This is only the
+// watchdog on the bridge: the per-turn timeout lives in the bridge itself.
+const BRIDGE_BOOT_GRACE_MS = 10 * 60_000
 const POLL_INTERVAL_MS = 3_000
 
 // ---------------------------------------------------------------------------
@@ -559,7 +563,7 @@ function parseSessionRows(text) {
 async function fetchSessions(bridge, cwd) {
   const args = cwd === undefined ? {} : { cwd }
   // The bridge prints either "No DeepSeek sessions found." or "<n> session(s):\n- <id>  cwd=..."
-  const { text } = await bridge.callToolOrThrow('deepseek_list_sessions', args, { timeoutMs: 90_000 })
+  const { text } = await bridge.callToolOrThrow('deepseek_list_sessions', args, { timeoutMs: BRIDGE_BOOT_GRACE_MS })
   return parseSessionIds(text)
 }
 
@@ -878,7 +882,7 @@ async function runWorker(jobId) {
     if (job.mcpConfig !== null && job.mcpConfig !== undefined) agentArgs.mcpConfig = job.mcpConfig
     if (resumeSessionId !== null) agentArgs.resumeSessionId = resumeSessionId
     const agentCall = bridge
-      .callTool('deepseek_agent', agentArgs, { timeoutMs: job.timeoutMs + 120_000, progressToken: 'dsh-offload' })
+      .callTool('deepseek_agent', agentArgs, { timeoutMs: job.timeoutMs + BRIDGE_BOOT_GRACE_MS, progressToken: 'dsh-offload' })
       // An MCP-level failure arrives as a successful result carrying isError:
       // without this check a dead job would be recorded as a finished one, with
       // the error text handed back as if it were an answer.
@@ -1575,7 +1579,7 @@ async function commandSessions(positional, flags) {
   const cwd = typeof flags.cwd === 'string' ? flags.cwd : undefined
   if (cwd !== undefined && !isAbsolutePath(cwd)) fail(`--cwd must be absolute: ${cwd}`)
   const text = await withBridge({}, async (bridge) => {
-    const { text: output } = await bridge.callToolOrThrow('deepseek_list_sessions', cwd === undefined ? {} : { cwd }, { timeoutMs: 90_000 })
+    const { text: output } = await bridge.callToolOrThrow('deepseek_list_sessions', cwd === undefined ? {} : { cwd }, { timeoutMs: BRIDGE_BOOT_GRACE_MS })
     return output
   })
   if (flags.json === true) {
@@ -1636,7 +1640,7 @@ async function commandSyncWorkspace(_positional, flags) {
   let candidates = []
   if (flags.all === true) {
     const text = await withBridge({}, async (bridge) => {
-      const { text: output } = await bridge.callToolOrThrow('deepseek_list_sessions', {}, { timeoutMs: 90_000 })
+      const { text: output } = await bridge.callToolOrThrow('deepseek_list_sessions', {}, { timeoutMs: BRIDGE_BOOT_GRACE_MS })
       return output
     })
     candidates = parseSessionRows(text).map((row) => ({ ...row, source: 'store' }))
@@ -1786,10 +1790,12 @@ function hasOrchestratorRule(text) {
 function probeBridge(serverPath) {
   const out = spawnSync(process.execPath, [serverPath, '--probe'], {
     cwd: PROJECT_ROOT,
-    env: process.env,
+    // One boot is enough for a health check, and its limit must end before this one
+    // does: a killed probe prints no report and reads as a bridge without `--probe`.
+    env: { ...process.env, DEEPSEEK_MCP_INIT_ATTEMPTS: '1' },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 120_000,
+    timeout: 150_000,
   })
   const line = (out.stdout || '').trim().split('\n').pop()
   try {

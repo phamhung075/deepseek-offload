@@ -477,6 +477,7 @@ original session in the GUI.
 | Session never appears in the GUI at all | `DSH_HOME` mismatch — GUI and bridge must share `~/.dsh`. |
 | Job row is in the GUI but idle, and its transcript never updates | Expected, not a fault: the GUI cannot host or stream a session another process runs. Follow it with `scripts/session-tail.mjs <jobId> --watch`. |
 | `dsh --profile acp exited with code …` | `acp` profile not initialized: `cd ~/deepseek-harness && pnpm dsh --profile acp --dump-config`. |
+| `ACP request timed out ... initialize (3 of 3 boot attempts)` | `dsh` could not boot while the machine was busy, three times, so no turn ran and no tokens were spent. A boot that times out is repeated by itself, so one failed boot no longer ends a job. Wait for the load to drop and start again, or raise `DEEPSEEK_MCP_INIT_TIMEOUT_MS`. |
 | Job `state: error`, worker gone | Worker died (crash/reboot) — read `scratch/dsh-offload/jobs/<jobId>.worker.log`. |
 | `wait` times out, job still running | Not stuck — raise `--timeout-ms`; check `status`, or follow the session log with `scripts/session-tail.mjs <jobId> --watch`. |
 | Result ends mid-sentence | ACP prompt timeout (`DEEPSEEK_MCP_TIMEOUT_MS`) — split the job or raise it. |

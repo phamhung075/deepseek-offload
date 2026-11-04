@@ -45,6 +45,11 @@ const DEFAULT_CWD = process.env.DEEPSEEK_MCP_DEFAULT_CWD || process.cwd()
 // 'allow' selects the first allow option for permission prompts; 'reject' denies them.
 const PERMISSION = (process.env.DEEPSEEK_MCP_PERMISSION || 'allow').toLowerCase()
 const TIMEOUT_MS = Number(process.env.DEEPSEEK_MCP_TIMEOUT_MS || 15 * 60 * 1000)
+// Booting `dsh --profile acp` costs about 3 s of CPU but mostly waits on disk: 7 s
+// warm, 31 s cold at load 13, past 60 s when compiles hold the machine. Nothing has
+// started at `initialize`, so a boot that runs out of time is safe to repeat.
+const INIT_TIMEOUT_MS = Number(process.env.DEEPSEEK_MCP_INIT_TIMEOUT_MS || 120 * 1000)
+const INIT_ATTEMPTS = Math.max(1, Number(process.env.DEEPSEEK_MCP_INIT_ATTEMPTS || 3))
 // Default MCP config file (Claude Code .mcp.json or Gemini .agents/mcp_config.json shape).
 const DEFAULT_MCP_CONFIG = process.env.DEEPSEEK_MCP_CONFIG || ''
 // Server names never forwarded; the bridge itself is excluded to prevent recursion.
@@ -749,7 +754,7 @@ class AcpClient {
       const id = String(acpNextId++)
       const timer = timeoutMs ? setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error(`ACP request timed out after ${timeoutMs}ms: ${method}`))
+        reject(Object.assign(new Error(`ACP request timed out after ${timeoutMs}ms: ${method}`), { acpTimeout: true }))
       }, timeoutMs) : null
       this.pending.set(id, { resolve, reject, timer })
       this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
@@ -783,6 +788,32 @@ class AcpClient {
 // ACP operations
 // ---------------------------------------------------------------------------
 /**
+ * Spawn an ACP child and initialize it, repeating a boot that ran out of time.
+ * Only a timeout is repeated: a child that exits or refuses `initialize` has a
+ * broken profile, which another boot would not change, so it fails at once.
+ * @param permission - permission policy passed to the child.
+ * @param options - `env` merged into the child's environment.
+ * @returns the live client and the agent's `initialize` result.
+ */
+async function bootAcp(permission, options) {
+  for (let attempt = 1; ; attempt++) {
+    const client = new AcpClient(permission, options)
+    try {
+      const initialized = await client.request('initialize', { protocolVersion: 1, clientCapabilities: {} }, INIT_TIMEOUT_MS)
+      return { client, initialized }
+    } catch (err) {
+      await client.dispose()
+      if (!err.acpTimeout) throw err
+      log(`dsh boot attempt ${attempt} of ${INIT_ATTEMPTS}: ${err.message}`)
+      if (attempt >= INIT_ATTEMPTS) {
+        err.message = `${err.message} (${attempt} of ${INIT_ATTEMPTS} boot attempts)`
+        throw err
+      }
+    }
+  }
+}
+
+/**
  * Run one operation against a fresh ACP child.
  * @param permission - permission policy passed to the child.
  * @param fn - operation receiving the initialized client and the agent's `initialize` result.
@@ -790,9 +821,8 @@ class AcpClient {
  * @returns whatever `fn` returns.
  */
 async function withAcp(permission, fn, options = {}) {
-  const client = new AcpClient(permission, options)
+  const { client, initialized } = await bootAcp(permission, options)
   try {
-    const initialized = await client.request('initialize', { protocolVersion: 1, clientCapabilities: {} }, 60000)
     return await fn(client, initialized)
   } finally {
     await client.dispose()

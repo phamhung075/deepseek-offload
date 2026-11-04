@@ -111,6 +111,8 @@ A server that fails to start aborts `session/new` — DSH reports this as a gene
 | `DEEPSEEK_MCP_DEFAULT_CWD` | the bridge process cwd | Default working directory for delegated sessions |
 | `DEEPSEEK_MCP_PERMISSION` | `allow` | `allow` auto-accepts tool permission prompts; `reject` denies them |
 | `DEEPSEEK_MCP_TIMEOUT_MS` | `900000` | Prompt timeout |
+| `DEEPSEEK_MCP_INIT_TIMEOUT_MS` | `120000` | Time one `dsh` boot has to answer ACP `initialize` |
+| `DEEPSEEK_MCP_INIT_ATTEMPTS` | `3` | Boots tried when `initialize` times out; a child that exits or refuses it fails at once |
 | `DEEPSEEK_MCP_CONFIG` | *(unset)* | Default client-shaped MCP config forwarded into every session |
 | `DEEPSEEK_MCP_SKIP` | `deepseek` | Comma-separated server names never forwarded |
 | `DEEPSEEK_MCP_ALLOW_GIT_WRITE` | *(unset)* | `1` lets a delegated session commit and push. Default: the git write guard refuses both |

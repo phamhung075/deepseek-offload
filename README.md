@@ -242,6 +242,7 @@ Bridge and runner environment (all optional):
 | `DEEPSEEK_MCP_CONFIG` | MCP config forwarded into delegated sessions. |
 | `DEEPSEEK_MCP_SKIP` | Server names never forwarded. |
 | `DEEPSEEK_MCP_TIMEOUT_MS` | Per-turn timeout. Default 15 min. |
+| `DEEPSEEK_MCP_INIT_TIMEOUT_MS`, `DEEPSEEK_MCP_INIT_ATTEMPTS` | How long one `dsh` boot may take, and how many boots to try when it times out. Default 120 s, 3 attempts. |
 | `DEEPSEEK_MCP_ALLOW_GIT_WRITE` | `1` lets a delegated job commit and push. Default: the git write guard refuses both. |
 | `DEEPSEEK_MCP_READ_ONLY` | `1` pins every delegated job to the `read-only` file policy, so it cannot modify a file. Default: unset (`workspace-write`). |
 | `DEEPSEEK_OFFLOAD_GUARD_DIR` | Where git write guards live. Default `$DSH_HOME/offload-guards`. |
