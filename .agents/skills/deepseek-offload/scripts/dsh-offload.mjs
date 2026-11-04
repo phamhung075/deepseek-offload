@@ -596,6 +596,67 @@ const WORKSPACE_ATTACH_DIR = process.env.DEEPSEEK_WORKSPACE_ATTACH_DIR
 /** A heartbeat older than this means the GUI or its plugin stopped. */
 const WORKSPACE_HEARTBEAT_MS = 30_000
 
+/**
+ * Name of the worker liveness file the GUI reads in a shell session's directory.
+ * Its presence with a live pid means the job worker still owns the session; the
+ * writer removes it before it exits, and a reader treats a dead pid or a start
+ * time that does not match as stale (a crash or a reboot).
+ */
+const WORKER_LIVENESS_FILE = 'offload-worker.json'
+
+/** Kernel start time of one pid, in clock ticks since boot; undefined off Linux. */
+function procStartTime(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const after = stat.slice(stat.lastIndexOf(')') + 2).trim().split(' ')
+    // after[0] is field 3 (state), so field 22 (starttime) is after[19].
+    return after[19]
+  } catch {
+    return undefined
+  }
+}
+
+/** Directory under `$DSH_HOME` the running workers advertise themselves in. */
+const WORKER_REGISTRY_DIR = path.join(DSH_HOME, 'offload-workers')
+
+/**
+ * Publish this worker's liveness where a Host can read it without knowing the
+ * job store: `$DSH_HOME/offload-workers/<jobId>.json`, keyed by job but
+ * carrying the session it owns and the socket that controls it.
+ * @param jobId - the job this worker runs.
+ * @param sessionId - the session the worker owns.
+ * @param socketPath - the update socket the GUI can reach.
+ * @returns the file path.
+ */
+function publishWorkerLiveness(jobId, sessionId, socketPath) {
+  if (typeof sessionId !== 'string' || sessionId === '' || typeof socketPath !== 'string') return null
+  fs.mkdirSync(WORKER_REGISTRY_DIR, { recursive: true, mode: 0o700 })
+  const target = path.join(WORKER_REGISTRY_DIR, `${jobId}.json`)
+  const pidStart = procStartTime(process.pid)
+  const body = JSON.stringify({
+    v: 1,
+    jobId,
+    pid: process.pid,
+    ...(pidStart === undefined ? {} : { pidStart }),
+    socketPath,
+    sessionId,
+    startedAt: Date.now(),
+  })
+  fs.writeFileSync(`${target}.tmp`, body)
+  fs.renameSync(`${target}.tmp`, target)
+  return target
+}
+
+/** Remove a liveness file this worker published; best effort at settle. */
+function unpublishWorkerLiveness(target) {
+  if (typeof target !== 'string') return
+  try {
+    fs.unlinkSync(target)
+  } catch {
+    /* already removed, or a reboot cleaned the directory */
+  }
+}
+
 /** Session ids the GUI currently accounts to some Workspace (read-only). */
 function accountedSessionIds() {
   const store = path.join(DSH_HOME, 'storages', 'workspace.json')
@@ -838,6 +899,8 @@ async function runWorker(jobId) {
   const startedAt = job.startedAt
   let bridge
   let updateServer
+  let socketPath
+  let livenessFile = null
   try {
     // A --defer-to-off-peak start: sleep here (worker already spawned and cancel-able
     // via forceKillWorkerTree, since no bridge/socket exists yet to accept a graceful
@@ -871,10 +934,14 @@ async function runWorker(jobId) {
     })
     await bridge.initialize()
     updateServer = await startUpdateSocket(jobId, bridge)
+    socketPath = updateServer.address()
     updateJob(jobId, { state: 'running', workerStartedAt: Date.now() })
 
     // A resumed job already knows its session, so there is nothing to discover.
     const resumeSessionId = typeof job.resumeSessionId === 'string' ? job.resumeSessionId : null
+    if (resumeSessionId !== null && typeof socketPath === 'string') {
+      livenessFile = publishWorkerLiveness(jobId, resumeSessionId, socketPath)
+    }
     const before = resumeSessionId === null ? new Set(await fetchSessions(bridge, job.cwd).catch(() => [])) : new Set()
     if (resumeSessionId === null) updateJob(jobId, { knownSessions: before.size })
 
@@ -904,10 +971,17 @@ async function runWorker(jobId) {
           if (fresh.length > 0) {
             discovered = fresh[0]
             updateJob(jobId, { sessionId: discovered, sessionDiscoveredAt: Date.now() })
+            if (livenessFile === null && typeof socketPath === 'string') {
+              livenessFile = publishWorkerLiveness(jobId, discovered, socketPath)
+            }
           }
         } catch {
           /* keep polling: the listing may race session materialization */
         }
+      }
+      // The log directory can appear after the id is listed, so retry until published.
+      if (livenessFile === null && discovered !== null && typeof socketPath === 'string') {
+        livenessFile = publishWorkerLiveness(jobId, discovered, socketPath)
       }
       const settled = await Promise.race([agentCall, Promise.resolve(SYMBOL_PENDING)])
       if (settled !== SYMBOL_PENDING) break
@@ -958,6 +1032,7 @@ async function runWorker(jobId) {
     }
     return 1
   } finally {
+    unpublishWorkerLiveness(livenessFile)
     let sockPath
     if (updateServer !== undefined) {
       sockPath = updateServer.address()
@@ -1005,7 +1080,7 @@ function describeJob(job, { full = false } = {}) {
   if (job.error) lines.push(`error     ${job.error.split('\n')[0]}`)
   if (job.resultFile) lines.push(`result    ${job.resultFile}`)
   lines.push(`follow    ${followCommand(job.jobId)}`)
-  lines.push(`gui       ${GUI_URL}  → session list for ${job.cwd} (row stays idle while the job runs)`)
+  lines.push(`gui       ${GUI_URL}  → session list for ${job.cwd} (row runs live while the worker is alive)`)
   if (!full && job.sessionId) lines.push('', `next      dsh-offload result ${job.jobId}`)
   return lines.join('\n')
 }
