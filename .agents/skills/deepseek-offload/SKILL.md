@@ -57,8 +57,10 @@ otherwise, and follows the session log and the live frame channel through `fork/
 - The transcript advances **without a reload**: `follow` reads the child's durable appends, and
   the frame channel carries its live Assistant text and tool calls.
 - **A message sent from the row reaches the running job** over the worker's update socket (the
-  same mechanism as `update`), never by starting a second agent. The message appears in the
-  transcript as a normal user message.
+  same mechanism as `update`), never by starting a second agent. The row's request id rides
+  along into the Session control inbox, so `fork/job-control` submits the durable user message
+  with that identity and the GUI shows one message, not the composer echo plus a copy. The socket
+  must therefore reach a Harness that loads `fork/job-control` (the bridge does by default).
 - The row's **Stop** sends a bare cancel over that socket: the worker settles, the row leaves
   running, and the job tree exits. `cancel` from the CLI does the same and the row shows it.
 - **After the job settles**, a message from the row resumes the session as a normal GUI-hosted
