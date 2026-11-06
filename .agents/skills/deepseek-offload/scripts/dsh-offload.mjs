@@ -890,6 +890,10 @@ async function runWorker(jobId) {
       updateJob(jobId, { state: 'starting', wokeAt: Date.now() })
     }
 
+    // The bridge announces the id of the session it created as a progress
+    // message (`session=<id>`). That is the job's own session; diffing session
+    // lists cannot tell two jobs started together in one cwd apart.
+    let announced = null
     bridge = new Bridge({
       permission: job.permission,
       timeoutMs: job.timeoutMs,
@@ -901,6 +905,11 @@ async function runWorker(jobId) {
         DEEPSEEK_MCP_READ_ONLY: job.readOnly === true ? '1' : '0',
       },
       onProgress: (params) => {
+        const announce = SESSION_ANNOUNCE_PATTERN.exec(typeof params.message === 'string' ? params.message : '')
+        if (announce !== null) {
+          announced = announce[1]
+          return
+        }
         try {
           updateJob(jobId, { progressChars: params.progress ?? 0, lastProgressAt: Date.now() })
         } catch {
@@ -938,11 +947,18 @@ async function runWorker(jobId) {
 
     // Discover the new session id while the agent works, so the caller can be
     // sent to the web GUI before the job finishes.
-    const discoveryDeadline = Date.now() + SESSION_DISCOVERY_TIMEOUT_MS
+    const discoveryStartedAt = Date.now()
+    const discoveryDeadline = discoveryStartedAt + SESSION_DISCOVERY_TIMEOUT_MS
     let discovered = resumeSessionId
     while (Date.now() < discoveryDeadline) {
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
-      if (discovered === null) {
+      if (discovered === null && announced !== null) {
+        discovered = announced
+        updateJob(jobId, { sessionId: discovered, sessionDiscoveredAt: Date.now() })
+      }
+      // Listing diff only for a bridge that never announces: it is ambiguous
+      // when another job in the same cwd creates a session at the same time.
+      if (discovered === null && Date.now() - discoveryStartedAt >= LIST_DISCOVERY_GRACE_MS) {
         try {
           const claimed = claimedSessionIds(jobId)
           const fresh = (await fetchSessions(bridge, job.cwd)).filter((id) => !before.has(id) && !claimed.has(id))
@@ -970,7 +986,8 @@ async function runWorker(jobId) {
     if (outcome.error) {
       const message = outcome.error.message || String(outcome.error)
       const failure = parseAgentResult(message)
-      const sessionId = discovered ?? failure.sessionId
+      // The bridge's own report names the session it ran; it outranks discovery.
+      const sessionId = failure.sessionId ?? announced ?? discovered
       updateJob(jobId, {
         state: 'error',
         error: message,
@@ -990,7 +1007,7 @@ async function runWorker(jobId) {
     fs.writeFileSync(resultFile(jobId), `${parsed.body}\n`)
     updateJob(jobId, {
       state: parsed.stopReason === 'cancelled' ? 'cancelled' : 'done',
-      sessionId: discovered ?? parsed.sessionId,
+      sessionId: parsed.sessionId ?? announced ?? discovered,
       stopReason: parsed.stopReason,
       bridgeElapsedMs: parsed.elapsedMs,
       resultChars: parsed.body.length,
@@ -1029,6 +1046,11 @@ async function runWorker(jobId) {
 }
 
 const SYMBOL_PENDING = Symbol('pending')
+// The bridge's `session=<id>` progress message (server.cjs onSessionId).
+const SESSION_ANNOUNCE_PATTERN = /^session=(\S+)$/
+// How long the worker waits for that announcement before it falls back to
+// diffing session lists (a bridge from before the announcement existed).
+const LIST_DISCOVERY_GRACE_MS = Number(process.env.DSH_OFFLOAD_LIST_DISCOVERY_GRACE_MS || 60_000)
 
 // ---------------------------------------------------------------------------
 // Commands
