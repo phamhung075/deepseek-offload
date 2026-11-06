@@ -3,7 +3,8 @@ name: deepseek-offload
 description: >-
   Use this skill to offload long, token-heavy, or parallelizable work from the
   current agent (Claude Code, Gemini/Antigravity, ChatGPT/Codex, or any MCP client)
-  to background DeepSeek Harness subagents running on deepseek-flash.
+  to background DeepSeek Harness subagents running on deepseek-flash (or deepseek-v4-pro, with a
+  per-job thinking effort).
   Covers the MCP bridge at .agents/mcp-deepseek/server.cjs
   (deepseek_agent / deepseek_list_sessions / deepseek_update_session), the
   background job runner in .agents/skills/deepseek-offload/scripts/dsh-offload.mjs (including `update` to steer,
@@ -206,10 +207,34 @@ Claude Code / Gemini / Codex / any MCP client
 
 ---
 
-## 3. Model: `deepseek-flash`
+## 3. Model and thinking effort
 
-Pinned once in the profile patch layer (`~/.dsh/profiles/acp/cordis.patch.yml`), not per call —
-there is no per-call model switch. `deepseek-flash` is the current name of DeepSeek-V4.1-Flash, which
+The default model is pinned in the profile patch layer (`~/.dsh/profiles/acp/cordis.patch.yml`),
+and the default thinking effort is the provider's (`high`). A job may pick both for itself:
+`start --model deepseek-flash|deepseek-v4-pro --effort none|low|high|max` (also on `resume`, which
+otherwise inherits the original job's), or `model` / `reasoningEffort` on `deepseek_agent`. A wrong
+value fails before a job is recorded. Match the setting to the job's difficulty:
+
+| Work | Setting |
+| :--- | :--- |
+| Mechanical edits, renames, formatting, finishing passes, log/file summaries | `--model deepseek-flash --effort low` (or `none`: no thinking at all) |
+| Normal feature passes, tests, ordinary bug fixes | `deepseek-flash`, `--effort high` (the default) |
+| Hard root cause, design, a fix that failed before | `--model deepseek-v4-pro --effort high`, or `max` for the hardest |
+
+**Cost:** `deepseek-v4-pro` costs more per token than `deepseek-flash`, and higher effort spends
+more output tokens on thinking, so `max` is for the job that needs it, not a default. `deepseek-v4-pro`
+is text-only: an image job stays on `deepseek-flash`.
+
+How it is applied: the bridge sets ACP `session/set_config_option` (`model`, then
+`reasoning_effort`) on the session before its first prompt, the per-session switch the Harness
+owns; a model switch also loads a `--patch` overlay (`$DSH_HOME/offload-models-*.cordis.yml`) that
+declares both ids, because the installed catalog lists only the pin. `none` maps to the Harness's
+`off`. The request then carries `thinking: {type: disabled}` for `none`, or
+`thinking: {type: enabled}` with `output_config: {effort}` otherwise (the Harness speaks the
+Messages endpoint). The result's `ModelSelection:` line, shown as `applied` in `status`, is what the
+session actually ran on.
+
+`deepseek-flash` is the current name of DeepSeek-V4.1-Flash, which
 supports vision, so offloaded jobs can read images directly (the same model `read_image_vision`
 uses). The legacy ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` still resolve to it
 today, but they name retired models; `deepseek-v4-pro` is the stronger text-only alternative. Verify
@@ -228,7 +253,7 @@ Three tools, exposed by `.agents/mcp-deepseek/server.cjs`:
 
 | Tool | Arguments | Returns |
 | :--- | :--- | :--- |
-| `deepseek_agent` | `prompt` (required, self-contained), `cwd` (optional absolute), `mcpConfig` (optional path), `resumeSessionId` (optional; continue that persisted session through ACP `session/resume` instead of starting a fresh one — it must not be running elsewhere and `cwd` must be its original directory) | The child's final text, prefixed with `stopReason`, elapsed ms, `session=<id>`, and the MCP servers attached. |
+| `deepseek_agent` | `prompt` (required, self-contained), `cwd` (optional absolute), `mcpConfig` (optional path), `model` (optional `deepseek-flash`\|`deepseek-v4-pro`), `reasoningEffort` (optional `none`\|`low`\|`high`\|`max`; section 3), `resumeSessionId` (optional; continue that persisted session through ACP `session/resume` instead of starting a fresh one — it must not be running elsewhere and `cwd` must be its original directory) | The child's final text, prefixed with `stopReason`, elapsed ms, `session=<id>`, the MCP servers attached, and the `ModelSelection:` it ran on. |
 | `deepseek_list_sessions` | `cwd` (optional absolute) | `- <sessionId>  cwd=…` lines for the shared store. |
 | `deepseek_mcp_servers` | `mcpConfig` (optional path) | Which MCP servers a delegation would receive, how each translates, and what was skipped. |
 | `deepseek_update_session` | `sessionId` (required, from `deepseek_agent`'s result), `message` (optional) | Steers, or stops, a session that is **still running** in this same bridge process — see "Steering or cancelling a running session" below. Errors if the session already finished. |
@@ -339,7 +364,8 @@ Every command accepts `--json`. Flags by command: `--cwd DIR` (start, resume, se
 (start, resume), `--session ID` (resume), `--prompt-file FILE` / `-f FILE`,
 `--permission allow|reject`, `--detach`, `--wait-session-ms N`, and `--defer-to-off-peak`
 (start only), `--all` (list, sync-workspace), `--dry-run` and `--wait-ms N`
-(sync-workspace), `--log` (status), and `--tz IANA_NAME` (window). Any other flag is
+(sync-workspace), `--log` (status), `--tz IANA_NAME` (window), and `--model ID` / `--effort LEVEL` (start, resume;
+section 3). Any other flag is
 rejected with `` unknown flag --X for `<command>` ``; the per-command list lives in
 `scripts/lib/cli-flags.mjs`.
 

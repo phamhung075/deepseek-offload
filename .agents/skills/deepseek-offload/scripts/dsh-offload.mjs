@@ -46,6 +46,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
 import { resolvePromptFile } from './lib/prompt-file.mjs'
+import { resolveModelFlags, describeModelLines, ModelFlagError } from './lib/model-effort.mjs'
 import { jobSocketPath } from './lib/job-socket.mjs'
 import {
   appendControlLine,
@@ -500,6 +501,8 @@ const GIT_WRITES_PATTERN = /^GitWrites:\s*(.+)$/m
 // And the file policy it ran under, so "was this job allowed to write?" is
 // answered by the result rather than inferred from the prompt.
 const FILE_POLICY_PATTERN = /^FilePolicy:\s*(.+)$/m
+// And the model and effort the session actually ran on, as the Harness reported them.
+const MODEL_SELECTION_PATTERN = /^ModelSelection:\s*(.+)$/m
 // The sandbox a guarded push lands in, when the bridge reported one.
 const GIT_SANDBOX_PATTERN = /redirected to (\S+?);/
 
@@ -510,6 +513,7 @@ function parseAgentResult(text) {
   const workspace = WORKSPACE_PATTERN.exec(text)
   const gitWrites = GIT_WRITES_PATTERN.exec(text)
   const filePolicy = FILE_POLICY_PATTERN.exec(text)
+  const modelSelection = MODEL_SELECTION_PATTERN.exec(text)
   const match = SUMMARY_PATTERN.exec(header)
   if (match === null) {
     return {
@@ -517,6 +521,7 @@ function parseAgentResult(text) {
       workspace: workspace === null ? null : workspace[1].trim(),
       gitWrites: gitWrites === null ? null : gitWrites[1].trim(),
       filePolicy: filePolicy === null ? null : filePolicy[1].trim(),
+      modelSelection: modelSelection === null ? null : modelSelection[1].trim(),
     }
   }
   return {
@@ -527,6 +532,7 @@ function parseAgentResult(text) {
     workspace: workspace === null ? null : workspace[1].trim(),
     gitWrites: gitWrites === null ? null : gitWrites[1].trim(),
     filePolicy: filePolicy === null ? null : filePolicy[1].trim(),
+    modelSelection: modelSelection === null ? null : modelSelection[1].trim(),
   }
 }
 
@@ -918,6 +924,8 @@ async function runWorker(jobId) {
     const agentArgs = { prompt: job.prompt, cwd: job.cwd }
     if (job.mcpConfig !== null && job.mcpConfig !== undefined) agentArgs.mcpConfig = job.mcpConfig
     if (resumeSessionId !== null) agentArgs.resumeSessionId = resumeSessionId
+    if (typeof job.model === 'string') agentArgs.model = job.model
+    if (typeof job.effort === 'string') agentArgs.reasoningEffort = job.effort
     const agentCall = bridge
       .callTool('deepseek_agent', agentArgs, { timeoutMs: job.timeoutMs + BRIDGE_BOOT_GRACE_MS, progressToken: 'dsh-offload' })
       // An MCP-level failure arrives as a successful result carrying isError:
@@ -970,6 +978,7 @@ async function runWorker(jobId) {
         workspace: failure.workspace,
         gitWrites: failure.gitWrites,
         filePolicy: failure.filePolicy,
+        modelSelection: failure.modelSelection,
         finishedAt,
         elapsedMs: finishedAt - startedAt,
       })
@@ -988,6 +997,7 @@ async function runWorker(jobId) {
       workspace: parsed.workspace,
       gitWrites: parsed.gitWrites,
       filePolicy: parsed.filePolicy,
+      modelSelection: parsed.modelSelection,
       finishedAt,
       elapsedMs: finishedAt - startedAt,
       resultFile: path.relative(PROJECT_ROOT, resultFile(jobId)),
@@ -1023,6 +1033,16 @@ const SYMBOL_PENDING = Symbol('pending')
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
+/** `--model` / `--effort`, validated before any job record is written. */
+function modelFlagsOrFail(flags, base = null) {
+  try {
+    return resolveModelFlags(flags, base)
+  } catch (error) {
+    if (error instanceof ModelFlagError) fail(error.message)
+    throw error
+  }
+}
+
 function describeJob(job, { full = false } = {}) {
   const lines = [
     `job       ${job.jobId}${job.label ? `  (${job.label})` : ''}`,
@@ -1045,6 +1065,7 @@ function describeJob(job, { full = false } = {}) {
   else if (job.allowGitWrite === true) lines.push('git       writes allowed (--allow-git-write)')
   if (typeof job.filePolicy === 'string') lines.push(`files     ${job.filePolicy}`)
   else if (job.readOnly === true) lines.push('files     read-only requested (--read-only)')
+  lines.push(...describeModelLines(job))
   if (job.mcpConfig) lines.push(`mcp       ${job.mcpConfig}`)
   else lines.push('mcp       (none)')
   if (job.error) lines.push(`error     ${job.error.split('\n')[0]}`)
@@ -1095,6 +1116,7 @@ async function commandStart(positional, flags) {
   if (flags['read-only'] === true && flags['allow-git-write'] === true) {
     fail('--read-only and --allow-git-write contradict each other: read-only denies the file writes a commit needs')
   }
+  const { model, effort } = modelFlagsOrFail(flags)
   if (!isAbsolutePath(cwd)) fail(`--cwd must be absolute: ${cwd}`)
   if (!fs.existsSync(cwd)) fail(`--cwd does not exist: ${cwd}`)
   if (!fs.existsSync(BRIDGE_SERVER)) fail(`bridge server not found: ${BRIDGE_SERVER}`)
@@ -1126,6 +1148,9 @@ async function commandStart(positional, flags) {
     // Read-only is the whole point of an investigation job, so it is a flag the
     // runner enforces through the job's file policy, not a sentence in a prompt.
     readOnly: flags['read-only'] === true,
+    // Null keeps the acp profile pin and the provider's default effort (high).
+    model,
+    effort,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : DEFAULT_TIMEOUT_MS,
     sessionId: null,
     startedAt: now,
@@ -1257,6 +1282,7 @@ async function commandResume(positional, flags) {
     fail('--read-only and --allow-git-write contradict each other: read-only denies the file writes a commit needs')
   }
   const readOnly = flags['read-only'] === true || (base.readOnly === true && flags['allow-git-write'] !== true)
+  const { model, effort } = modelFlagsOrFail(flags, base)
   const allowGitWrite = flags['allow-git-write'] === true || (base.allowGitWrite === true && flags['read-only'] !== true)
   let mcpConfig = typeof flags['mcp-config'] === 'string' ? flags['mcp-config'] : base.mcpConfig
   if (mcpConfig !== null && mcpConfig !== undefined && mcpConfig !== '') {
@@ -1278,6 +1304,8 @@ async function commandResume(positional, flags) {
     permission: base.permission ?? DEFAULT_PERMISSION,
     allowGitWrite,
     readOnly,
+    model,
+    effort,
     timeoutMs: typeof flags['timeout-ms'] === 'string' ? Number(flags['timeout-ms']) : (base.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     resumeOf: source === null ? null : source.jobId,
     resumeSessionId: sessionId,
@@ -1339,7 +1367,7 @@ async function commandResult(positional, flags) {
   const file = resultFile(jobId)
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
   if (flags.json === true) {
-    const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, result: text }
+    const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, model: job.model ?? null, effort: job.effort ?? null, modelSelection: job.modelSelection ?? null, result: text }
     print(payload, true)
     return job.state === 'error' ? 1 : 0
   }
@@ -2094,6 +2122,11 @@ function usage() {
                                  --read-only  pin the job to the read-only file policy,
                                    so it cannot modify a file at all (default:
                                    workspace-write, mutations inside the workspace)
+                                 --model deepseek-flash|deepseek-v4-pro  model for this
+                                   job (default: the acp profile pin)
+                                 --effort none|low|high|max  thinking effort (default
+                                   high; none disables thinking). v4-pro and higher
+                                   effort cost more: see the skill's model table
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
@@ -2101,7 +2134,8 @@ function usage() {
                                  (same cwd, guards and history; the agent re-checks
                                  the workspace first). --session ID --cwd DIR resumes
                                  a session with no job record; --label --timeout-ms
-                                 --read-only --allow-git-write --mcp-config --json
+                                 --read-only --allow-git-write --mcp-config
+                                 --model --effort (default: the original job's) --json
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
   result <jobId> [--json]      final report text, plus the deterministic failure
                                triage when the job ended in error

@@ -41,12 +41,12 @@ export const COMMAND_FLAGS = Object.freeze({
   start: Object.freeze({
     name: 'start',
     boolean: ['allow-git-write', 'read-only', 'detach', 'json', 'defer-to-off-peak'],
-    value: ['prompt-file', 'f', 'cwd', 'mcp-config', 'label', 'permission', 'timeout-ms', 'wait-session-ms'],
+    value: ['prompt-file', 'f', 'cwd', 'mcp-config', 'label', 'permission', 'timeout-ms', 'wait-session-ms', 'model', 'effort'],
   }),
   resume: Object.freeze({
     name: 'resume',
     boolean: ['read-only', 'allow-git-write', 'json'],
-    value: ['session', 'cwd', 'label', 'timeout-ms', 'mcp-config'],
+    value: ['session', 'cwd', 'label', 'timeout-ms', 'mcp-config', 'model', 'effort'],
   }),
   status: Object.freeze({ name: 'status', boolean: ['json', 'log'], value: [] }),
   result: Object.freeze({ name: 'result', boolean: ['json'], value: [] }),

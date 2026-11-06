@@ -631,6 +631,132 @@ function describeGitWrites() {
 }
 
 // ---------------------------------------------------------------------------
+// Per-job model and thinking effort
+// ---------------------------------------------------------------------------
+// The DeepSeek API model ids a job may switch to. The `acp` profile pin stays
+// the default; these are the ids a caller may ask for instead.
+const JOB_MODELS = Object.freeze(['deepseek-flash', 'deepseek-v4-pro'])
+// The API's reasoning_effort spellings mapped onto the Harness's effort ids
+// (`off|low|high|max`, packages/llm/llm-deepseek). `none` disables thinking;
+// `minimal`, `medium` and `xhigh` are the aliases the API itself accepts.
+const EFFORT_IDS = Object.freeze({
+  none: 'off', off: 'off', minimal: 'low', low: 'low', medium: 'high', high: 'high', xhigh: 'high', max: 'max',
+})
+// The ACP session config option ids the Harness advertises
+// (packages/acp/acp/src/model-control.ts).
+const MODEL_OPTION_ID = 'model'
+const EFFORT_OPTION_ID = 'reasoning_effort'
+
+/**
+ * Validate a requested model id.
+ * @param value - the caller's value, or undefined/empty for the profile pin.
+ * @returns the id, or undefined when none was requested.
+ */
+function normalizeModel(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value !== 'string' || !JOB_MODELS.includes(value)) {
+    throw new Error(`model must be one of ${JOB_MODELS.join(', ')} (got ${JSON.stringify(value)})`)
+  }
+  return value
+}
+
+/**
+ * Map a requested thinking effort onto the Harness's effort id.
+ * @param value - an API spelling (`none|low|high|max` and its aliases), or undefined/empty for the default.
+ * @returns `off|low|high|max`, or undefined when none was requested.
+ */
+function normalizeEffort(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const id = typeof value === 'string' ? EFFORT_IDS[value.toLowerCase()] : undefined
+  if (id === undefined) {
+    throw new Error(`reasoningEffort must be one of none, low, high, max (got ${JSON.stringify(value)})`)
+  }
+  return id
+}
+
+/**
+ * The overlay that lets a session switch to any of JOB_MODELS. A profile patch
+ * replaces the provider's model catalog, and the installer's catalog lists only
+ * the pinned id, so without this `deepseek-v4-pro` is not a selectable option.
+ * Image input is declared exactly as the installer declares it.
+ * @returns the overlay path, or null when it could not be written.
+ */
+function ensureModelCatalogPatch() {
+  const source = '# Written by deepseek-mcp for a job that asks for a model (deepseek_agent `model`).\n'
+    + '# Declares every switchable id so the ACP model option can select it.\n'
+    + '- id: llm-deepseek\n'
+    + '  config:\n'
+    + '    models:\n'
+    + '      - id: deepseek-flash\n'
+    + '        name: DeepSeek-V4.1-Flash\n'
+    + "        inputModalities: ['text', 'image']\n"
+    + '      - id: deepseek-v4-pro\n'
+    + '        name: DeepSeek-V4-Pro\n'
+    + "        inputModalities: ['text']\n"
+  const digest = crypto.createHash('sha256').update(source).digest('hex').slice(0, 16)
+  const file = path.join(DSH_HOME, `offload-models-${digest}.cordis.yml`)
+  try {
+    if (fs.existsSync(file)) return file
+    fs.mkdirSync(DSH_HOME, { recursive: true })
+    const temporary = `${file}.${process.pid}.tmp`
+    fs.writeFileSync(temporary, source)
+    fs.renameSync(temporary, file)
+    return file
+  } catch (error) {
+    log(`model catalog overlay could not be written: ${error.message}`)
+    return null
+  }
+}
+
+/**
+ * The model and effort a session's config options currently select.
+ * @param options - ACP `configOptions`.
+ * @returns `{ provider, model, effort }`, fields null when not advertised.
+ */
+function selectedModel(options) {
+  const list = Array.isArray(options) ? options : []
+  const modelOption = list.find((option) => option && option.id === MODEL_OPTION_ID)
+  const effortOption = list.find((option) => option && option.id === EFFORT_OPTION_ID)
+  let provider = null
+  let model = null
+  try {
+    const pair = JSON.parse(modelOption.currentValue)
+    if (Array.isArray(pair) && pair.length === 2) [provider, model] = pair
+  } catch {}
+  const effort = effortOption && typeof effortOption.currentValue === 'string'
+    ? (effortOption.currentValue === '' ? 'provider-default' : effortOption.currentValue)
+    : null
+  return { provider, model, effort }
+}
+
+/**
+ * Apply a job's model and effort through the ACP session config options, the
+ * per-session switch the Harness owns: the loop logs the selection in the
+ * session header and builds every request from it. Model first: a model change
+ * resets the effort to that model's default.
+ * @param client - the ACP client.
+ * @param sessionId - the session to configure.
+ * @param options - the session's config options after new/resume.
+ * @param request - `{ model, effort }`, each undefined to keep the default.
+ * @returns the `ModelSelection:` result line.
+ */
+async function applyModelSelection(client, sessionId, options, { model, effort }) {
+  let current = options
+  if (model !== undefined) {
+    const { provider } = selectedModel(current)
+    const value = JSON.stringify([provider ?? 'deepseek-official', model])
+    current = (await client.request('session/set_config_option', { sessionId, configId: MODEL_OPTION_ID, value }, 60000)).configOptions
+  }
+  if (effort !== undefined) {
+    current = (await client.request('session/set_config_option', { sessionId, configId: EFFORT_OPTION_ID, value: effort }, 60000)).configOptions
+  }
+  const applied = selectedModel(current)
+  const requested = [model === undefined ? null : `model=${model}`, effort === undefined ? null : `effort=${effort}`].filter(Boolean)
+  return `ModelSelection: ${applied.provider ?? '?'}/${applied.model ?? '?'} effort=${applied.effort ?? '?'}`
+    + (requested.length === 0 ? ' (profile default)' : ` (requested ${requested.join(' ')})`)
+}
+
+// ---------------------------------------------------------------------------
 // ACP client (talks to `dsh --profile acp`)
 // ---------------------------------------------------------------------------
 let acpNextId = 1
@@ -829,8 +955,11 @@ async function withAcp(permission, fn, options = {}) {
   }
 }
 
-async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, resumeSessionId }) {
+async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, resumeSessionId, model, effort }) {
   const startedAt = Date.now()
+  // Only a job that switches model needs the full catalog; the default keeps
+  // the profile's own catalog untouched.
+  const modelPatch = model === undefined ? null : ensureModelCatalogPatch()
   // Resolve before spawning ACP so a broken MCP config fails loud, not mid-turn.
   const resolvedMcp = mcpConfigPath ? resolveMcpServers(mcpConfigPath) : null
   if (resolvedMcp !== null) log(`forwarding MCP servers: ${describeMcpServers(resolvedMcp)}`)
@@ -847,12 +976,16 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, r
     // session/resume restores a persisted, inactive session's history without
     // replaying its old updates, so collectedText holds only the new turns.
     let sessionId
+    let configOptions
     if (resumeSessionId) {
-      await client.request('session/resume', { sessionId: resumeSessionId, cwd, mcpServers }, 60000)
+      ({ configOptions } = (await client.request('session/resume', { sessionId: resumeSessionId, cwd, mcpServers }, 60000)) || {})
       sessionId = resumeSessionId
     } else {
-      ({ sessionId } = await client.request('session/new', { cwd, mcpServers }, 60000))
+      ({ sessionId, configOptions } = await client.request('session/new', { cwd, mcpServers }, 60000))
     }
+    // Set before the first prompt, so the first request already carries it.
+    const modelSelection = await applyModelSelection(client, sessionId, configOptions, { model, effort })
+    log(`session ${sessionId}: ${modelSelection}`)
     // A distinct, unthrottled announcement — not routed through onProgress's char-count
     // heartbeat, which a short "session <id>" string almost never crosses the threshold
     // for — so a caller can reliably capture the id while the call is still in flight.
@@ -884,7 +1017,7 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, r
           // goes looking for its session in the GUI.
           const text = client.collectedText
           const prefix = text ? `DeepSeek returned partial output before failing:\n\n${text}\n\n---\n` : ''
-          throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}\n${await workspaceAttach}\n${gitWrites}\n${filePolicy}`)
+          throw new Error(`${prefix}DeepSeek agent run failed: ${err.message}\n${await workspaceAttach}\n${gitWrites}\n${filePolicy}\n${modelSelection}`)
         }
         stopReason = result && result.stopReason ? result.stopReason : 'end_turn'
         // A queued update — from a natural stop, or from session/cancel interrupting this
@@ -913,8 +1046,9 @@ async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, r
       workspace: await workspaceAttach,
       gitWrites,
       filePolicy,
+      modelSelection,
     }
-  }, { env: guardEnvironment(ensureGitGuard()), patches: gitRootsPatch === null ? [] : [gitRootsPatch] })
+  }, { env: guardEnvironment(ensureGitGuard()), patches: [gitRootsPatch, modelPatch].filter((patch) => patch !== null) })
 }
 
 async function listSessions({ cwd }) {
@@ -958,6 +1092,20 @@ const TOOLS = [
             'Optional path to an MCP client config (Claude Code .mcp.json or Gemini mcp_config.json). ' +
             'Its servers are mounted into the DeepSeek session, so the child can call tools like ' +
             'mcp__docs__extract_document. Defaults to DEEPSEEK_MCP_CONFIG when that is set.',
+        },
+        model: {
+          type: 'string',
+          enum: [...JOB_MODELS],
+          description:
+            'Optional DeepSeek model for this job; omitted keeps the acp profile pin. deepseek-flash is the cheap ' +
+            'default for routine work; deepseek-v4-pro costs more and is for hard root-cause or design work.',
+        },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'low', 'high', 'max'],
+          description:
+            'Optional thinking effort for this job: none disables thinking, low for mechanical edits, high (the ' +
+            'default) for normal work, max for the hardest tasks. Higher effort spends more output tokens.',
         },
         resumeSessionId: {
           type: 'string',
@@ -1072,7 +1220,17 @@ async function handleToolsCall(id, params) {
         ? args.resumeSessionId.trim()
         : undefined
 
-      const out = await runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, resumeSessionId })
+      let model
+      let effort
+      try {
+        model = normalizeModel(args.model)
+        effort = normalizeEffort(args.reasoningEffort)
+      } catch (error) {
+        respondResult(id, { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true })
+        return
+      }
+
+      const out = await runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, resumeSessionId, model, effort })
 
       const header = [
         `DeepSeek agent finished (stopReason=${out.stopReason}, ${out.elapsedMs}ms, session=${out.sessionId})`,
@@ -1081,6 +1239,7 @@ async function handleToolsCall(id, params) {
         out.workspace,
         out.gitWrites,
         out.filePolicy,
+        out.modelSelection,
         '',
         out.text || '(no text output)',
       ].join('\n')

@@ -1,0 +1,163 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
+
+/**
+ * A stand-in for `dsh --profile acp` that advertises the Harness's model and
+ * reasoning_effort session options, applies `session/set_config_option` the
+ * way packages/acp/acp/src/model-control.ts does, and logs every request and
+ * its argv to `STUB_LOG`.
+ */
+const STUB = `#!/usr/bin/env node
+'use strict'
+const fs = require('node:fs')
+const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\\n')
+fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ argv: process.argv.slice(2) }) + '\\n')
+let model = '["deepseek-official","deepseek-flash"]'
+let effort = 'high'
+const options = () => [
+  { id: 'model', type: 'select', currentValue: model, options: [] },
+  { id: 'reasoning_effort', type: 'select', currentValue: effort, options: [] },
+]
+let buffer = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (chunk) => {
+  buffer += chunk
+  let index
+  while ((index = buffer.indexOf('\\n')) !== -1) {
+    const line = buffer.slice(0, index)
+    buffer = buffer.slice(index + 1)
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined || msg.id === null) continue
+    fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ method: msg.method, params: msg.params }) + '\\n')
+    if (msg.method === 'session/prompt') {
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } } } })
+      send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } })
+    } else if (msg.method === 'session/list') {
+      send({ jsonrpc: '2.0', id: msg.id, result: { sessions: [] } })
+    } else if (msg.method === 'session/new') {
+      send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fresh-session', configOptions: options() } })
+    } else if (msg.method === 'session/set_config_option') {
+      if (msg.params.configId === 'model') { model = msg.params.value; effort = 'high' }
+      else effort = msg.params.value
+      send({ jsonrpc: '2.0', id: msg.id, result: { configOptions: options() } })
+    } else {
+      send({ jsonrpc: '2.0', id: msg.id, result: {} })
+    }
+  }
+})
+`
+
+function fixture(name) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `dsh-offload-model-${name}-`))
+  const project = path.join(root, 'project')
+  fs.mkdirSync(project)
+  const stub = path.join(root, 'stub-dsh.cjs')
+  fs.writeFileSync(stub, STUB)
+  fs.chmodSync(stub, 0o755)
+  const jobs = path.join(root, 'jobs-root')
+  fs.mkdirSync(path.join(jobs, 'jobs'), { recursive: true })
+  return { root, project, stub, jobs, log: path.join(root, 'acp.log') }
+}
+
+function run(fx, args) {
+  return spawnSync(process.execPath, [RUNNER, ...args], {
+    cwd: fx.project,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: {
+      ...process.env,
+      HOME: fx.root,
+      DSH_HOME: path.join(fx.root, 'dsh-home'),
+      DSH_BIN: fx.stub,
+      DSH_BRIDGE_PROJECT_ROOT: fx.project,
+      DSH_OFFLOAD_JOB_DIR: fx.jobs,
+      DSH_OFFLOAD_FORK_OVERLAYS: '0',
+      DEEPSEEK_OFFLOAD_GUARD_DIR: path.join(fx.root, 'guards'),
+      DEEPSEEK_MCP_DEFAULT_CWD: fx.project,
+      DEEPSEEK_WORKSPACE_ATTACH: '0',
+      DEEPSEEK_MCP_CONFIG: '',
+      STUB_LOG: fx.log,
+    },
+  })
+}
+
+function startAndWait(fx, flags) {
+  const started = run(fx, ['start', 'tiny task', '--cwd', fx.project, '--detach', '--json', ...flags])
+  assert.equal(started.status, 0, started.stderr)
+  const job = JSON.parse(started.stdout)
+  const waited = run(fx, ['wait', job.jobId, '--timeout-ms', '45000', '--json'])
+  assert.equal(waited.status, 0, waited.stderr)
+  const entries = fs.readFileSync(fx.log, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  return { job, outcome: JSON.parse(waited.stdout), entries }
+}
+
+test('--model and --effort are recorded and set on the session before the first prompt', () => {
+  const fx = fixture('pro-max')
+  const { job, outcome, entries } = startAndWait(fx, ['--model', 'deepseek-v4-pro', '--effort', 'max'])
+  assert.equal(job.model, 'deepseek-v4-pro')
+  assert.equal(job.effort, 'max')
+  assert.equal(outcome.state, 'done')
+  assert.equal(outcome.modelSelection, 'deepseek-official/deepseek-v4-pro effort=max (requested model=deepseek-v4-pro effort=max)')
+
+  const methods = entries.filter((entry) => entry.method).map((entry) => entry.method)
+  const sets = entries.filter((entry) => entry.method === 'session/set_config_option').map((entry) => entry.params)
+  assert.deepEqual(sets, [
+    { sessionId: 'fresh-session', configId: 'model', value: '["deepseek-official","deepseek-v4-pro"]' },
+    { sessionId: 'fresh-session', configId: 'reasoning_effort', value: 'max' },
+  ], 'model first, since a model change resets the effort')
+  assert.ok(methods.lastIndexOf('session/set_config_option') < methods.indexOf('session/prompt'))
+
+  const argvLines = entries.filter((entry) => entry.argv)
+  const agent = argvLines.find((entry) => entry.argv.some((arg) => /offload-models-/.test(arg)))
+  assert.ok(agent, 'the agent child got the model catalog overlay')
+  const overlayPath = agent.argv.find((arg) => /offload-models-/.test(arg))
+  assert.equal(agent.argv[agent.argv.indexOf(overlayPath) - 1], '--patch')
+  const overlay = fs.readFileSync(overlayPath, 'utf8')
+  assert.match(overlay, /- id: deepseek-v4-pro/)
+  assert.match(overlay, /- id: deepseek-flash\n\s+name: DeepSeek-V4.1-Flash\n\s+inputModalities: \['text', 'image'\]/)
+
+  const status = run(fx, ['status', job.jobId])
+  assert.match(status.stdout, /^model {5}deepseek-v4-pro {2}effort max$/m)
+  assert.match(status.stdout, /^applied {3}deepseek-official\/deepseek-v4-pro effort=max/m)
+})
+
+test('--effort none turns thinking off and keeps the profile model', () => {
+  const fx = fixture('none')
+  const { outcome, entries } = startAndWait(fx, ['--effort', 'none'])
+  assert.equal(outcome.model, null)
+  assert.equal(outcome.effort, 'none')
+  const sets = entries.filter((entry) => entry.method === 'session/set_config_option').map((entry) => entry.params)
+  assert.deepEqual(sets, [{ sessionId: 'fresh-session', configId: 'reasoning_effort', value: 'off' }])
+  assert.equal(entries.some((entry) => entry.argv && entry.argv.some((arg) => /offload-models-/.test(arg))), false,
+    'no catalog overlay without a model switch')
+  assert.match(outcome.modelSelection, /^deepseek-official\/deepseek-flash effort=off \(requested effort=off\)$/)
+})
+
+test('without --model and --effort the session keeps the profile default', () => {
+  const fx = fixture('default')
+  const { outcome, entries } = startAndWait(fx, [])
+  assert.equal(outcome.model, null)
+  assert.equal(outcome.effort, null)
+  assert.equal(entries.some((entry) => entry.method === 'session/set_config_option'), false)
+  assert.equal(outcome.modelSelection, 'deepseek-official/deepseek-flash effort=high (profile default)')
+  const status = run(fx, ['status', outcome.jobId])
+  assert.match(status.stdout, /^model {5}profile default {2}effort default \(high\)$/m)
+})
+
+for (const [flag, value] of [['--model', 'deepseek-chat'], ['--effort', 'medium'], ['--effort', 'off']]) {
+  test(`an unknown ${flag} ${value} fails before a job is recorded`, () => {
+    const fx = fixture('bad')
+    const out = run(fx, ['start', 'tiny task', '--cwd', fx.project, flag, value])
+    assert.equal(out.status, 1)
+    assert.match(out.stderr, new RegExp(`${flag} must be one of`))
+    assert.deepEqual(fs.readdirSync(path.join(fx.jobs, 'jobs')), [])
+  })
+}
