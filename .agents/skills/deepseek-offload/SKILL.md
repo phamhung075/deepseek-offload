@@ -135,10 +135,10 @@ it for every job, whether or not the caller has other work while the job runs.
 ```sh
 # One background command PER job (run_in_background: true / background command), all sent in one turn:
 node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId1> --timeout-ms 3600000 2>&1 \
-  | sed -n '/--- result ---/,$p' | cut -c1-2600 | head -50
+  | sed -n -e '/^dsh-offload:/p' -e '/--- result ---/,$p' | cut -c1-2600 | head -50; echo "wait exit=${PIPESTATUS[0]}"
 # ...and a second, separate background command:
 node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId2> --timeout-ms 3600000 2>&1 \
-  | sed -n '/--- result ---/,$p' | cut -c1-2600 | head -50
+  | sed -n -e '/^dsh-offload:/p' -e '/--- result ---/,$p' | cut -c1-2600 | head -50; echo "wait exit=${PIPESTATUS[0]}"
 ```
 
 Why this shape:
@@ -147,7 +147,13 @@ Why this shape:
    settles, triggering one reactive wakeup per job instead of wasting turns polling
    `manage_task(status ...)` or `result`.
 2. **Filters Heartbeat Noise**: `sed -n '/--- result ---/,$p'` strips the intermediate
-   `waiting running 15s...` progress messages, delivering only the clean deliverable.
+   `waiting running 15s...` progress messages, delivering only the clean deliverable. The
+   `/^dsh-offload:/p` clause and the `wait exit=` line keep the runner's own errors and exit code:
+   without them a pipeline exits with `head`'s status, so a failed `wait` (for example an unknown
+   job id) "completes" with empty output and exit 0 (observed 2026-11-07). `wait`, `status` and
+   `result` exit 1 on an unknown id. A job id the caller's own store lacks is looked up in the
+   machine-wide job index (`~/.local/state/dsh-offload/job-index.jsonl`, or `$DSH_OFFLOAD_INDEX`),
+   so a waiter launched from another directory than the one `start` ran in still finds its job.
 3. **Guards Against Context Inflation**: `cut -c1-2600 | head -50` bounds line length and line
    count, protecting the context window.
 4. **Parallel Fan-Out without blind spots**: one waiter per job means every job reports the moment

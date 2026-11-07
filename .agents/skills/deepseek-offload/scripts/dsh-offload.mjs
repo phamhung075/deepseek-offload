@@ -48,6 +48,7 @@ import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
 import { resolvePromptFile } from './lib/prompt-file.mjs'
 import { resolveModelFlags, describeModelLines, ModelFlagError, isBlockedModel, JOB_MODELS, SAFE_MODEL } from './lib/model-effort.mjs'
 import { jobSocketPath } from './lib/job-socket.mjs'
+import { recordJobStore, lookupJobStore } from './lib/job-index.mjs'
 import {
   appendControlLine,
   controlPathForSession,
@@ -147,7 +148,10 @@ function writeJsonAtomic(file, value) {
 
 function readJob(jobId) {
   const file = jobFile(jobId)
-  if (!fs.existsSync(file)) fail(`unknown job id: ${jobId} (see \`list\`)`)
+  if (!fs.existsSync(file)) {
+    fail(`unknown job id: ${jobId}: not in ${JOBS_DIR} nor in any store the job index knows `
+      + '(see `list`; run from the directory that started the job, or set DSH_OFFLOAD_JOB_DIR=<that dir>/scratch/dsh-offload)')
+  }
   return JSON.parse(fs.readFileSync(file, 'utf8'))
 }
 
@@ -1105,6 +1109,7 @@ function describeJob(job, { full = false } = {}) {
 function launchWorker(record) {
   const { jobId } = record
   writeJsonAtomic(jobFile(jobId), record)
+  recordJobStore(jobId, JOB_ROOT, PROJECT_ROOT)
   const log = fs.openSync(workerLogFile(jobId), 'a')
   const worker = spawn(process.execPath, [fileURLToPath(import.meta.url), '__run', jobId], {
     cwd: PROJECT_ROOT,
@@ -2212,11 +2217,44 @@ Environment: DSH_HOME, DEEPSEEK_MCP_DEFAULT_CWD, DEEPSEEK_MCP_PERMISSION,
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+/** Commands whose first positional argument is a job id. */
+const JOB_ID_COMMANDS = new Set(['status', 'result', 'update', 'cancel', 'wait', 'resume'])
+
+/**
+ * Re-run this command against the store that holds `jobId`, when the local
+ * store does not. The child gets that store's job root and project root, so
+ * every path (record, result, socket, bridge cwd) is the one the job uses.
+ * @param command - the subcommand.
+ * @param jobId - its first positional argument.
+ * @returns the child's exit code, or null when no redirect applies.
+ */
+function redirectToJobStore(command, jobId) {
+  if (!JOB_ID_COMMANDS.has(command) || typeof jobId !== 'string' || jobId === '') return null
+  if (process.env.DSH_OFFLOAD_REDIRECTED === '1' || fs.existsSync(jobFile(jobId))) return null
+  const store = lookupJobStore(jobId, JOB_ROOT)
+  if (store === null) return null
+  process.stderr.write(`dsh-offload: job ${jobId} is stored in ${store.jobRoot}; reading it there\n`)
+  const child = spawnSync(process.execPath, process.argv.slice(1), {
+    stdio: 'inherit',
+    env: { ...process.env, DSH_OFFLOAD_JOB_DIR: store.jobRoot, DSH_BRIDGE_PROJECT_ROOT: store.projectRoot, DSH_OFFLOAD_REDIRECTED: '1' },
+  })
+  if (child.error) fail(`could not follow job ${jobId} to ${store.jobRoot}: ${child.error.message}`)
+  return typeof child.status === 'number' ? child.status : 1
+}
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2)
   // The command's own flag spec gates every token before any side effect: an
   // unknown or malformed flag calls `fail` here, not inside the command.
   const { positional, flags } = parseArgs(rest, specForCommand(command), fail)
+
+  // A job id this directory's store does not hold may live in another
+  // project's store (the one `start` ran from): follow the job index there.
+  const redirected = redirectToJobStore(command, positional[0])
+  if (redirected !== null) {
+    process.exitCode = redirected
+    return
+  }
 
   switch (command) {
     case '__run': {
