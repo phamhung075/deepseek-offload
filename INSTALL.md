@@ -118,7 +118,7 @@ facts a wrong install gets wrong. Then install:
 | --- | --- |
 | `--with-mcp-config` | The human's agent is Claude Code (`.mcp.json`) or Gemini/Antigravity (`.agents/mcp_config.json`). Without it you get the profiles and the plugin, but no MCP entry. |
 | `--permission reject` | The work is read-only, or the project is untrusted. Default is `allow`: delegated sessions run unattended and auto-accept every permission prompt. Ask the human if unsure; `reject` is the safe answer. |
-| `--model NAME` | `doctor` reports an API model-name error. This route accepts `deepseek-flash` (default, vision-capable) and `deepseek-v4-pro`; the legacy ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still accepted but name retired models, so do not choose one for a new install. |
+| `--model NAME` | `doctor` reports an API model-name error. This route accepts `deepseek-flash` (default, vision-capable); `deepseek-v4-pro` and every pro id are refused (owner ruling 2026-11-07); the legacy ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still accepted but name retired models, so do not choose one for a new install. |
 | `--dsh-root DIR` / `--dsh-home DIR` | Phase 0 found a Harness outside the conventional locations, or a `DSH_HOME` other than `~/.dsh`. |
 | `--with-vision-subagent` | The human also wants *their own* agent to read images through the Harness. Touches the Harness checkout's `standard` preset. |
 | `--no-project-links` | The project should not gain `.agents/` entries (rare; for a package used only as a shell tool). |

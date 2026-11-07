@@ -35,7 +35,8 @@ provider does not know fails at the first turn with `The supported API model nam
 job that dies instantly is usually this pin, not the bridge — change it with
 `install.sh --model <id>` (or `DEEPSEEK_OFFLOAD_MODEL`) rather than editing the row by hand.
 
-`deepseek-flash` is the name this route accepts; `deepseek-v4-pro` is the other one. The ids
+`deepseek-flash` is the name this route accepts. `deepseek-v4-pro` is blocked (owner ruling
+2026-11-07): the installer, runner and bridge refuse every pro id. The ids
 `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` still resolve but name retired models served
 by DeepSeek-V4.1-Flash, so pin one only for compatibility with a route that has not moved on.
 
@@ -60,9 +61,6 @@ the job still runs, it just cannot read a picture. `$DSH_HOME/profiles/acp/cordi
       - id: deepseek-flash
         name: DeepSeek-V4.1-Flash
         inputModalities: ['text', 'image']
-      - id: deepseek-v4-pro
-        name: DeepSeek-V4-Pro
-        inputModalities: ['text']
 ```
 
 Verify: `dsh --profile acp --dump-config` shows the `llm-deepseek` row with that list, and

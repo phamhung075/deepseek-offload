@@ -3,7 +3,8 @@
 # merge the rows into an existing patch layer. Verify with:
 #   dsh --profile acp --dump-config
 # Change the id with `install.sh --model <id>` or DEEPSEEK_OFFLOAD_MODEL; the
-# provider route must know it (`deepseek-flash`, `deepseek-v4-pro`).
+# provider route must know it (`deepseek-flash`). deepseek-v4-pro and every
+# pro id are refused (owner ruling 2026-11-07, .agents/mcp-deepseek/model-policy.cjs).
 - id: acp
   config:
     provider: deepseek-official
@@ -19,9 +20,6 @@
       - id: deepseek-flash
         name: DeepSeek-V4.1-Flash
         inputModalities: ['text', 'image']
-      - id: deepseek-v4-pro
-        name: DeepSeek-V4-Pro
-        inputModalities: ['text']
       - id: deepseek-v4-flash
         name: DeepSeek-V4-Flash
         inputModalities: ['text']

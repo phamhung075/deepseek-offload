@@ -44,7 +44,7 @@ stream a transcript the job is still appending to. Both need
 
 | Tool | What it does |
 | :--- | :--- |
-| `deepseek_agent(prompt, cwd?, mcpConfig?, model?, reasoningEffort?, resumeSessionId?)` | Runs one DeepSeek task in a fresh session (on `model` `deepseek-flash`\|`deepseek-v4-pro` and thinking `reasoningEffort` `none`\|`low`\|`high`\|`max` when given, set through ACP `session/set_config_option`; the result's `ModelSelection:` line says what it ran on), or, with `resumeSessionId`, as the next turn of that persisted session (ACP `session/resume`; `cwd` must be its original directory); returns the final answer + session id. |
+| `deepseek_agent(prompt, cwd?, mcpConfig?, model?, reasoningEffort?, resumeSessionId?)` | Runs one DeepSeek task in a fresh session (on `model` `deepseek-flash` — `deepseek-v4-pro` and every pro id are refused, owner ruling 2026-11-07 — and thinking `reasoningEffort` `none`\|`low`\|`high`\|`max` when given, set through ACP `session/set_config_option`; the result's `ModelSelection:` line says what it ran on), or, with `resumeSessionId`, as the next turn of that persisted session (ACP `session/resume`; `cwd` must be its original directory); returns the final answer + session id. |
 | `deepseek_list_sessions(cwd?)` | Lists DeepSeek sessions from the shared store. |
 | `deepseek_mcp_servers(mcpConfig?)` | Resolves which MCP servers a delegation would receive, without running an agent. |
 | `deepseek_update_session(sessionId, message?)` | Steers or cancels a session that's still mid-turn in this bridge process: interrupts it (`session/cancel`), then re-prompts the same session with `message` if given (preserving history), or — if `message` is omitted — closes the session normally with no redirect (`stopReason=cancelled`). Errors if the session already finished. |
@@ -143,8 +143,9 @@ deliberate opt-out for a task that genuinely must write history.
 
 ## Choosing the DeepSeek model
 
-The route accepts `deepseek-flash` (vision-capable, and the id this installer pins) and
-`deepseek-v4-pro`. The older ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still
+The route accepts `deepseek-flash` (vision-capable, and the id this installer pins). `deepseek-v4-pro`
+is blocked by owner ruling 2026-11-07: `model-policy.cjs` refuses every pro id in the installer, the
+runner and this bridge. The older ids `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still
 accepted, but they name retired models served by DeepSeek-V4.1-Flash, so a new install should not
 pin them. The pin lives in `~/.dsh/profiles/acp/cordis.patch.yml`:
 

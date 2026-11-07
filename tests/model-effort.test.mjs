@@ -19,7 +19,7 @@ const STUB = `#!/usr/bin/env node
 const fs = require('node:fs')
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\\n')
 fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ argv: process.argv.slice(2) }) + '\\n')
-let model = '["deepseek-official","deepseek-flash"]'
+let model = process.env.STUB_MODEL || '["deepseek-official","deepseek-flash"]'
 let effort = 'high'
 const options = () => [
   { id: 'model', type: 'select', currentValue: model, options: [] },
@@ -85,6 +85,7 @@ function run(fx, args) {
       DEEPSEEK_WORKSPACE_ATTACH: '0',
       DEEPSEEK_MCP_CONFIG: '',
       STUB_LOG: fx.log,
+      ...(fx.env ?? {}),
     },
   })
 }
@@ -100,17 +101,17 @@ function startAndWait(fx, flags) {
 }
 
 test('--model and --effort are recorded and set on the session before the first prompt', () => {
-  const fx = fixture('pro-max')
-  const { job, outcome, entries } = startAndWait(fx, ['--model', 'deepseek-v4-pro', '--effort', 'max'])
-  assert.equal(job.model, 'deepseek-v4-pro')
+  const fx = fixture('flash-max')
+  const { job, outcome, entries } = startAndWait(fx, ['--model', 'deepseek-flash', '--effort', 'max'])
+  assert.equal(job.model, 'deepseek-flash')
   assert.equal(job.effort, 'max')
   assert.equal(outcome.state, 'done')
-  assert.equal(outcome.modelSelection, 'deepseek-official/deepseek-v4-pro effort=max (requested model=deepseek-v4-pro effort=max)')
+  assert.equal(outcome.modelSelection, 'deepseek-official/deepseek-flash effort=max (requested model=deepseek-flash effort=max)')
 
   const methods = entries.filter((entry) => entry.method).map((entry) => entry.method)
   const sets = entries.filter((entry) => entry.method === 'session/set_config_option').map((entry) => entry.params)
   assert.deepEqual(sets, [
-    { sessionId: 'fresh-session', configId: 'model', value: '["deepseek-official","deepseek-v4-pro"]' },
+    { sessionId: 'fresh-session', configId: 'model', value: '["deepseek-official","deepseek-flash"]' },
     { sessionId: 'fresh-session', configId: 'reasoning_effort', value: 'max' },
   ], 'model first, since a model change resets the effort')
   assert.ok(methods.lastIndexOf('session/set_config_option') < methods.indexOf('session/prompt'))
@@ -121,12 +122,12 @@ test('--model and --effort are recorded and set on the session before the first 
   const overlayPath = agent.argv.find((arg) => /offload-models-/.test(arg))
   assert.equal(agent.argv[agent.argv.indexOf(overlayPath) - 1], '--patch')
   const overlay = fs.readFileSync(overlayPath, 'utf8')
-  assert.match(overlay, /- id: deepseek-v4-pro/)
+  assert.doesNotMatch(overlay, /pro/i, 'the catalog overlay never declares a pro model')
   assert.match(overlay, /- id: deepseek-flash\n\s+name: DeepSeek-V4.1-Flash\n\s+inputModalities: \['text', 'image'\]/)
 
   const status = run(fx, ['status', job.jobId])
-  assert.match(status.stdout, /^model {5}deepseek-v4-pro {2}effort max$/m)
-  assert.match(status.stdout, /^applied {3}deepseek-official\/deepseek-v4-pro effort=max/m)
+  assert.match(status.stdout, /^model {5}deepseek-flash {2}effort max$/m)
+  assert.match(status.stdout, /^applied {3}deepseek-official\/deepseek-flash effort=max/m)
 })
 
 test('--effort none turns thinking off and keeps the profile model', () => {
@@ -161,3 +162,57 @@ for (const [flag, value] of [['--model', 'deepseek-chat'], ['--effort', 'medium'
     assert.deepEqual(fs.readdirSync(path.join(fx.jobs, 'jobs')), [])
   })
 }
+
+// Owner ruling 2026-11-07: never use deepseek-v4-pro, blocked in code.
+for (const id of ['deepseek-v4-pro', 'DeepSeek-V4-Pro', 'deepseek-official/deepseek-v4-pro', 'deepseek-pro']) {
+  test(`start --model ${id} is refused before a job is recorded, naming the ruling`, () => {
+    const fx = fixture('pro')
+    const out = run(fx, ['start', 'tiny task', '--cwd', fx.project, '--model', id])
+    assert.equal(out.status, 1)
+    assert.match(out.stderr, /owner ruling 2026-11-07/)
+    assert.match(out.stderr, /--model deepseek-flash/)
+    assert.deepEqual(fs.readdirSync(path.join(fx.jobs, 'jobs')), [])
+    assert.equal(fs.existsSync(fx.log), false, 'no Harness was started')
+  })
+}
+
+test('resume of a job recorded on v4-pro runs on deepseek-flash and says so; an explicit pro resume is refused', () => {
+  const fx = fixture('pro-resume')
+  const { job } = startAndWait(fx, [])
+  const file = path.join(fx.jobs, 'jobs', `${job.jobId}.json`)
+  // A record written before the block.
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), model: 'deepseek-v4-pro' }))
+
+  const refused = run(fx, ['resume', job.jobId, '--model', 'deepseek-v4-pro'])
+  assert.equal(refused.status, 1)
+  assert.match(refused.stderr, /owner ruling 2026-11-07/)
+
+  const resumed = run(fx, ['resume', job.jobId, '--json'])
+  assert.equal(resumed.status, 0, resumed.stderr)
+  assert.match(resumed.stderr, /resume runs on deepseek-flash/)
+  const next = JSON.parse(resumed.stdout)
+  assert.equal(next.model, 'deepseek-flash')
+  const waited = run(fx, ['wait', next.jobId, '--timeout-ms', '45000', '--json'])
+  assert.equal(waited.status, 0, waited.stderr)
+  assert.match(JSON.parse(waited.stdout).modelSelection, /^deepseek-official\/deepseek-flash /)
+})
+
+test('the bridge moves a session that selects a pro model onto deepseek-flash before the first prompt', () => {
+  const fx = fixture('pro-pin')
+  fx.env = { STUB_MODEL: '["deepseek-official","deepseek-v4-pro"]' }
+  const { outcome, entries } = startAndWait(fx, [])
+  assert.equal(outcome.state, 'done')
+  const sets = entries.filter((entry) => entry.method === 'session/set_config_option').map((entry) => entry.params)
+  assert.deepEqual(sets, [{ sessionId: 'fresh-session', configId: 'model', value: '["deepseek-official","deepseek-flash"]' }])
+  assert.match(outcome.modelSelection, /^deepseek-official\/deepseek-flash /)
+})
+
+test('doctor reports the pro model block', () => {
+  const fx = fixture('doctor')
+  const out = run(fx, ['doctor', '--json'])
+  const checks = JSON.parse(out.stdout).checks ?? JSON.parse(out.stdout)
+  const block = (Array.isArray(checks) ? checks : []).find((check) => check.name === 'pro model block')
+  assert.ok(block, out.stdout)
+  assert.equal(block.ok, true, block.detail)
+  assert.match(block.detail, /deepseek-v4-pro and every pro id refused/)
+})

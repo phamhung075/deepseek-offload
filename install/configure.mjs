@@ -47,11 +47,13 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PLUGIN_SOURCE = path.join(PACKAGE_ROOT, '.agents', 'dsh-workspace-attach')
 const RUNNER = path.join(PACKAGE_ROOT, '.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs')
 const BRIDGE = path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'server.cjs')
+const MODEL_POLICY = createRequire(import.meta.url)(path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'model-policy.cjs'))
 
 /**
  * Model every delegated session runs on: `--model`, then `$DEEPSEEK_OFFLOAD_MODEL`,
@@ -62,7 +64,12 @@ const BRIDGE = path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'server.cjs')
  */
 function acpModel() {
   const flag = typeof args.model === 'string' ? args.model.trim() : ''
-  return flag !== '' ? flag : process.env.DEEPSEEK_OFFLOAD_MODEL || 'deepseek-flash'
+  const model = flag !== '' ? flag : process.env.DEEPSEEK_OFFLOAD_MODEL || MODEL_POLICY.SAFE_MODEL
+  // Owner ruling 2026-11-07: no pin, flag or environment variable may name a pro model.
+  if (MODEL_POLICY.isBlockedModel(model)) {
+    fail(`${flag !== '' ? '--model' : 'DEEPSEEK_OFFLOAD_MODEL'} ${model} refused: ${MODEL_POLICY.PRO_RULING}. Use ${MODEL_POLICY.SAFE_MODEL}.`)
+  }
+  return model
 }
 /** Provider route that model id belongs to. */
 const ACP_PROVIDER = 'deepseek-official'
@@ -603,7 +610,6 @@ function ensureAcpPin(file) {
 function acpCatalogRows(model) {
   const known = [
     ['deepseek-flash', 'DeepSeek-V4.1-Flash'],
-    ['deepseek-v4-pro', 'DeepSeek-V4-Pro'],
     ['deepseek-v4-flash', 'DeepSeek-V4-Flash'],
     ['deepseek-v4-flash-vision-exp', 'DeepSeek-V4-Flash-Vision-Exp'],
   ]
@@ -1129,7 +1135,7 @@ function addVisionSubagent(dshRoot) {
   }
   const row = [
     '    # A dedicated image reader: a child pinned to the DeepSeek vision model so a',
-    '    # session can stay on a text-only model (v4-flash / v4-pro) and still read',
+    '    # session can stay on a text-only model (v4-flash) and still read',
     '    # image files. Fork cannot do this — it inherits the parent\'s model — so this',
     '    # stays on the `spawn` backend with a fixed route. `one-shot` waits for the',
     '    # description inline, and `maxDepth: 1` keeps the reader a leaf (it cannot',
@@ -1219,6 +1225,8 @@ function projectLinks(project) {
     // The bridge requires its git write guard as a sibling, so the guard is a
     // project entry of its own rather than part of a linked directory.
     { link: path.join(project, '.agents', 'mcp-deepseek', 'git-guard.cjs'), target: path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'git-guard.cjs') },
+    // The model policy (no deepseek-v4-pro) is required by the bridge and the runner alike.
+    { link: path.join(project, '.agents', 'mcp-deepseek', 'model-policy.cjs'), target: path.join(PACKAGE_ROOT, '.agents', 'mcp-deepseek', 'model-policy.cjs') },
     { link: path.join(project, '.agents', 'dsh-workspace-attach'), target: path.join(PACKAGE_ROOT, '.agents', 'dsh-workspace-attach') },
     // `SKILL.md` is what makes the directory a skill the calling agent loads,
     // and `session-tail.mjs` is the tailer every doc tells the reader to run.

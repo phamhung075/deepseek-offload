@@ -34,6 +34,7 @@ const {
   guardRoot,
   installGitWriteGuard,
 } = require('./git-guard.cjs')
+const MODEL_POLICY = require('./model-policy.cjs')
 
 // ---------------------------------------------------------------------------
 // Configuration (env-overridable)
@@ -634,8 +635,9 @@ function describeGitWrites() {
 // Per-job model and thinking effort
 // ---------------------------------------------------------------------------
 // The DeepSeek API model ids a job may switch to. The `acp` profile pin stays
-// the default; these are the ids a caller may ask for instead.
-const JOB_MODELS = Object.freeze(['deepseek-flash', 'deepseek-v4-pro'])
+// the default; these are the ids a caller may ask for instead. Every "pro" id
+// is refused (owner ruling 2026-11-07, model-policy.cjs).
+const JOB_MODELS = MODEL_POLICY.ALLOWED_MODELS
 // The API's reasoning_effort spellings mapped onto the Harness's effort ids
 // (`off|low|high|max`, packages/llm/llm-deepseek). `none` disables thinking;
 // `minimal`, `medium` and `xhigh` are the aliases the API itself accepts.
@@ -654,9 +656,11 @@ const EFFORT_OPTION_ID = 'reasoning_effort'
  */
 function normalizeModel(value) {
   if (value === undefined || value === null || value === '') return undefined
-  if (typeof value !== 'string' || !JOB_MODELS.includes(value)) {
+  if (typeof value !== 'string') {
     throw new Error(`model must be one of ${JOB_MODELS.join(', ')} (got ${JSON.stringify(value)})`)
   }
+  const refusal = MODEL_POLICY.modelRefusal(value, 'model')
+  if (refusal !== null) throw new Error(refusal)
   return value
 }
 
@@ -676,8 +680,9 @@ function normalizeEffort(value) {
 
 /**
  * The overlay that lets a session switch to any of JOB_MODELS. A profile patch
- * replaces the provider's model catalog, and the installer's catalog lists only
- * the pinned id, so without this `deepseek-v4-pro` is not a selectable option.
+ * replaces the provider's model catalog, so this declares exactly the allowed
+ * ids: a session that was pinned to (or resumed on) a blocked model can be
+ * moved onto deepseek-flash, and no pro id is ever a selectable option.
  * Image input is declared exactly as the installer declares it.
  * @returns the overlay path, or null when it could not be written.
  */
@@ -690,9 +695,6 @@ function ensureModelCatalogPatch() {
     + '      - id: deepseek-flash\n'
     + '        name: DeepSeek-V4.1-Flash\n'
     + "        inputModalities: ['text', 'image']\n"
-    + '      - id: deepseek-v4-pro\n'
-    + '        name: DeepSeek-V4-Pro\n'
-    + "        inputModalities: ['text']\n"
   const digest = crypto.createHash('sha256').update(source).digest('hex').slice(0, 16)
   const file = path.join(DSH_HOME, `offload-models-${digest}.cordis.yml`)
   try {
@@ -742,6 +744,12 @@ function selectedModel(options) {
  */
 async function applyModelSelection(client, sessionId, options, { model, effort }) {
   let current = options
+  // A blocked (pro) model is never run, whatever selected it: a profile pin
+  // edited by hand, or a resumed session that ran on it before the block.
+  if (model === undefined && MODEL_POLICY.isBlockedModel(selectedModel(current).model)) {
+    log(`session ${sessionId}: ${selectedModel(current).model} is blocked; switching to ${MODEL_POLICY.SAFE_MODEL}`)
+    model = MODEL_POLICY.SAFE_MODEL
+  }
   if (model !== undefined) {
     const { provider } = selectedModel(current)
     const value = JSON.stringify([provider ?? 'deepseek-official', model])
@@ -751,6 +759,10 @@ async function applyModelSelection(client, sessionId, options, { model, effort }
     current = (await client.request('session/set_config_option', { sessionId, configId: EFFORT_OPTION_ID, value: effort }, 60000)).configOptions
   }
   const applied = selectedModel(current)
+  if (MODEL_POLICY.isBlockedModel(applied.model)) {
+    throw new Error(`session ${sessionId} still selects ${applied.provider}/${applied.model}: ${MODEL_POLICY.PRO_RULING}; `
+      + `the job is refused. Pin ${MODEL_POLICY.SAFE_MODEL} in the acp profile (install.sh --model ${MODEL_POLICY.SAFE_MODEL}).`)
+  }
   const requested = [model === undefined ? null : `model=${model}`, effort === undefined ? null : `effort=${effort}`].filter(Boolean)
   return `ModelSelection: ${applied.provider ?? '?'}/${applied.model ?? '?'} effort=${applied.effort ?? '?'}`
     + (requested.length === 0 ? ' (profile default)' : ` (requested ${requested.join(' ')})`)
@@ -958,8 +970,9 @@ async function withAcp(permission, fn, options = {}) {
 async function runAgent({ prompt, cwd, onProgress, onSessionId, mcpConfigPath, resumeSessionId, model, effort }) {
   const startedAt = Date.now()
   // Only a job that switches model needs the full catalog; the default keeps
-  // the profile's own catalog untouched.
-  const modelPatch = model === undefined ? null : ensureModelCatalogPatch()
+  // the profile's own catalog untouched. A resumed session may have run on a
+  // blocked model, so it gets the catalog too: deepseek-flash must be selectable.
+  const modelPatch = model === undefined && !resumeSessionId ? null : ensureModelCatalogPatch()
   // Resolve before spawning ACP so a broken MCP config fails loud, not mid-turn.
   const resolvedMcp = mcpConfigPath ? resolveMcpServers(mcpConfigPath) : null
   if (resolvedMcp !== null) log(`forwarding MCP servers: ${describeMcpServers(resolvedMcp)}`)
@@ -1097,8 +1110,8 @@ const TOOLS = [
           type: 'string',
           enum: [...JOB_MODELS],
           description:
-            'Optional DeepSeek model for this job; omitted keeps the acp profile pin. deepseek-flash is the cheap ' +
-            'default for routine work; deepseek-v4-pro costs more and is for hard root-cause or design work.',
+            'Optional DeepSeek model for this job; omitted keeps the acp profile pin. Only deepseek-flash is ' +
+            'allowed: deepseek-v4-pro and every other pro id are refused (owner ruling 2026-11-07).',
         },
         reasoningEffort: {
           type: 'string',

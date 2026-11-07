@@ -46,7 +46,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
 import { resolvePromptFile } from './lib/prompt-file.mjs'
-import { resolveModelFlags, describeModelLines, ModelFlagError } from './lib/model-effort.mjs'
+import { resolveModelFlags, describeModelLines, ModelFlagError, isBlockedModel, JOB_MODELS, SAFE_MODEL } from './lib/model-effort.mjs'
 import { jobSocketPath } from './lib/job-socket.mjs'
 import {
   appendControlLine,
@@ -1304,7 +1304,8 @@ async function commandResume(positional, flags) {
     fail('--read-only and --allow-git-write contradict each other: read-only denies the file writes a commit needs')
   }
   const readOnly = flags['read-only'] === true || (base.readOnly === true && flags['allow-git-write'] !== true)
-  const { model, effort } = modelFlagsOrFail(flags, base)
+  const { model, effort, notice: modelNotice } = modelFlagsOrFail(flags, base)
+  if (modelNotice !== null) process.stderr.write(`dsh-offload: ${modelNotice}\n`)
   const allowGitWrite = flags['allow-git-write'] === true || (base.allowGitWrite === true && flags['read-only'] !== true)
   let mcpConfig = typeof flags['mcp-config'] === 'string' ? flags['mcp-config'] : base.mcpConfig
   if (mcpConfig !== null && mcpConfig !== undefined && mcpConfig !== '') {
@@ -1904,6 +1905,7 @@ function probeBridge(serverPath) {
 const PROJECT_CODE_ENTRIES = [
   path.join('.agents', 'mcp-deepseek', 'server.cjs'),
   path.join('.agents', 'mcp-deepseek', 'git-guard.cjs'),
+  path.join('.agents', 'mcp-deepseek', 'model-policy.cjs'),
   path.join('.agents', 'skills', 'deepseek-offload', 'scripts', 'dsh-offload.mjs'),
   path.join('.agents', 'skills', 'deepseek-offload', 'scripts', 'session-tail.mjs'),
 ]
@@ -1975,6 +1977,23 @@ async function commandDoctor(_positional, flags) {
     model = match === null ? null : match[1]
   }
   push('acp profile patch', model !== null, model === null ? `no model override in ${patchFile}` : `model=${model} (${patchFile})`)
+  // Owner ruling 2026-11-07: pro models are blocked in code. The check proves
+  // the refusal is live (the policy refuses deepseek-v4-pro) and that the
+  // profile pin does not name a pro id the bridge would have to refuse.
+  const proRefused = (() => {
+    try {
+      resolveModelFlags({ model: 'deepseek-v4-pro' })
+      return false
+    } catch (error) {
+      return error instanceof ModelFlagError
+    }
+  })()
+  const pinBlocked = model !== null && isBlockedModel(model)
+  push('pro model block', proRefused && !pinBlocked, !proRefused
+    ? '--model deepseek-v4-pro is NOT refused — the model policy is broken'
+    : pinBlocked
+      ? `acp profile pins ${model}, a blocked pro model; jobs would be refused — re-run install.sh (pins ${SAFE_MODEL}) or edit ${patchFile}`
+      : `deepseek-v4-pro and every pro id refused (owner ruling 2026-11-07); allowed: ${JOB_MODELS.join(', ')}`)
   // A pin that names a model the provider's catalog does not carry still runs,
   // but text-only: image jobs under it are refused at the first read. The
   // provider declares the vision model itself; every other id must be declared
@@ -2144,11 +2163,12 @@ function usage() {
                                  --read-only  pin the job to the read-only file policy,
                                    so it cannot modify a file at all (default:
                                    workspace-write, mutations inside the workspace)
-                                 --model deepseek-flash|deepseek-v4-pro  model for this
-                                   job (default: the acp profile pin)
+                                 --model deepseek-flash  model for this job (default:
+                                   the acp profile pin). deepseek-v4-pro and every
+                                   other "pro" id are refused (owner ruling 2026-11-07)
                                  --effort none|low|high|max  thinking effort (default
-                                   high; none disables thinking). v4-pro and higher
-                                   effort cost more: see the skill's model table
+                                   high; none disables thinking). Higher effort costs
+                                   more: see the skill's model table
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
@@ -2157,7 +2177,8 @@ function usage() {
                                  the workspace first). --session ID --cwd DIR resumes
                                  a session with no job record; --label --timeout-ms
                                  --read-only --allow-git-write --mcp-config
-                                 --model --effort (default: the original job's) --json
+                                 --model --effort (default: the original job's; a
+                                   job that ran on v4-pro resumes on deepseek-flash) --json
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
   result <jobId> [--json]      final report text, plus the deterministic failure
                                triage when the job ended in error
