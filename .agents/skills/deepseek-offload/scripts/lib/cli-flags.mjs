@@ -40,12 +40,12 @@ export const COMMAND_FLAGS = Object.freeze({
   __run: Object.freeze({ name: '__run', boolean: [], value: [] }),
   start: Object.freeze({
     name: 'start',
-    boolean: ['allow-git-write', 'read-only', 'detach', 'json', 'defer-to-off-peak'],
+    boolean: ['allow-git-write', 'read-only', 'detach', 'json', 'defer-to-off-peak', 'no-project-rules'],
     value: ['prompt-file', 'f', 'cwd', 'mcp-config', 'label', 'permission', 'timeout-ms', 'wait-session-ms', 'model', 'effort'],
   }),
   resume: Object.freeze({
     name: 'resume',
-    boolean: ['read-only', 'allow-git-write', 'json'],
+    boolean: ['read-only', 'allow-git-write', 'json', 'no-project-rules'],
     value: ['prompt-file', 'f', 'session', 'cwd', 'label', 'timeout-ms', 'mcp-config', 'model', 'effort'],
   }),
   status: Object.freeze({ name: 'status', boolean: ['json', 'log'], value: [] }),
@@ -58,7 +58,7 @@ export const COMMAND_FLAGS = Object.freeze({
   sessions: Object.freeze({ name: 'sessions', boolean: ['json'], value: ['cwd'] }),
   'mcp-servers': Object.freeze({ name: 'mcp-servers', boolean: ['json'], value: ['mcp-config'] }),
   'sync-workspace': Object.freeze({ name: 'sync-workspace', boolean: ['all', 'dry-run', 'json'], value: ['wait-ms'] }),
-  doctor: Object.freeze({ name: 'doctor', boolean: ['json'], value: [] }),
+  doctor: Object.freeze({ name: 'doctor', boolean: ['json'], value: ['cwd'] }),
   window: Object.freeze({ name: 'window', boolean: ['json'], value: ['tz'] }),
 })
 

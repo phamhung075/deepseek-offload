@@ -482,6 +482,32 @@ Keep the return small — ask for findings, not a transcript. The bridge opens a
 call**: a follow-up is a new job that receives the previous report; a human can continue the
 original session in the GUI.
 
+**Repo-wide rules go in the project rules file, not in the prompt.** Anything every job in a
+repository must follow (build commands, branch and commit policy, review rules, files to read
+first) belongs in `.agents/offload-rules.md` at the repository top level, which every job is told
+to read before its task (next section). The prompt then carries only this job's objective, scope,
+method and output contract. A rule pasted by hand into each prompt is missed sooner or later, and
+the job that missed it is redone.
+
+### Project rules file
+
+- **Convention:** `<git toplevel of the job's --cwd>/.agents/offload-rules.md`. A linked worktree
+  resolves to its own top level (`git rev-parse --show-toplevel` from the cwd), so a job reads the
+  copy on its own branch.
+- **What the runner does:** when the file exists, `start` and `resume` (Path B) prepend one line to
+  the prompt the child receives, followed by a blank line:
+  `Before anything else, read <absolute path> in full and follow it; it is this project's contract for every job.`
+  The file's content is not pasted; the child reads it. No file: the prompt is sent unchanged, byte
+  for byte. `resume` checks again and points at the file's current content.
+- **Opt out for one job:** `--no-project-rules` on `start` or `resume` (a resumed job inherits the
+  opt-out of the job it continues).
+- **Where it shows:** the job record keeps `projectRules: { path, sha256 }` of the content the run
+  was pointed at; `status` and the `result` header print it on a `rules` line (`rules  none` or
+  `rules  not included (--no-project-rules)` otherwise), and `result --json` carries
+  `projectRules`. `doctor [--cwd DIR]` names the file jobs in that directory would read, or none.
+- The MCP tool `deepseek_agent` (Path A) sends the prompt as given; name the file in the prompt
+  yourself there.
+
 ---
 
 ## 8. Mandatory rules and safety

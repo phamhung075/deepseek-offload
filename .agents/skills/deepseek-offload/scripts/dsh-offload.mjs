@@ -58,6 +58,7 @@ import {
   unpublishWorkerLiveness,
 } from './lib/worker-liveness.mjs'
 import { triageJob, renderTriageBlock } from './lib/triage.mjs'
+import { applyProjectRules, describeProjectRules, findProjectRules, gitTopLevel, PROJECT_RULES_RELATIVE } from './lib/project-rules.mjs'
 
 // ---------------------------------------------------------------------------
 // Paths and defaults
@@ -1094,6 +1095,7 @@ function describeJob(job, { full = false } = {}) {
   if (typeof job.filePolicy === 'string') lines.push(`files     ${job.filePolicy}`)
   else if (job.readOnly === true) lines.push('files     read-only requested (--read-only)')
   lines.push(...describeModelLines(job))
+  lines.push(describeProjectRules(job))
   if (job.mcpConfig) lines.push(`mcp       ${job.mcpConfig}`)
   else lines.push('mcp       (none)')
   if (job.error) lines.push(`error     ${job.error.split('\n')[0]}`)
@@ -1153,12 +1155,18 @@ async function commandStart(positional, flags) {
   const deferredUntil = flags['defer-to-off-peak'] === true && isPeakAt(now) ? nextOffPeakStart(now) : null
 
   const jobId = newJobId()
+  const skipRules = flags['no-project-rules'] === true
+  const { prompt: sentPrompt, projectRules } = applyProjectRules(prompt, cwd, { skip: skipRules })
 
   const record = {
     jobId,
     label: typeof flags.label === 'string' ? flags.label : null,
     state: 'starting',
-    prompt,
+    // The prompt the child receives: the caller's, behind the rules line when
+    // the project has a rules file.
+    prompt: sentPrompt,
+    projectRules,
+    projectRulesSkipped: skipRules,
     cwd,
     mcpConfig,
     permission: typeof flags.permission === 'string' ? flags.permission : DEFAULT_PERMISSION,
@@ -1267,6 +1275,7 @@ async function commandResume(positional, flags) {
       permission: DEFAULT_PERMISSION,
       allowGitWrite: false,
       readOnly: false,
+      projectRulesSkipped: false,
       timeoutMs: DEFAULT_TIMEOUT_MS,
     }
   } else {
@@ -1315,11 +1324,18 @@ async function commandResume(positional, flags) {
   const now = Date.now()
   const jobId = newJobId()
   const baseLabel = typeof flags.label === 'string' ? flags.label : base.label
+  // Read again on every resume: the file may have changed since the first run,
+  // and the record keeps the sha of the content this run was pointed at.
+  const skipRules = flags['no-project-rules'] === true || base.projectRulesSkipped === true
+  const resumePrompt = extra === '' ? RESUME_PROMPT : `${RESUME_PROMPT}\n\nAdditional instructions for this continuation:\n${extra}`
+  const { prompt: sentPrompt, projectRules } = applyProjectRules(resumePrompt, base.cwd, { skip: skipRules })
   const record = {
     jobId,
     label: baseLabel ? `${baseLabel} (resumed)` : null,
     state: 'starting',
-    prompt: extra === '' ? RESUME_PROMPT : `${RESUME_PROMPT}\n\nAdditional instructions for this continuation:\n${extra}`,
+    prompt: sentPrompt,
+    projectRules,
+    projectRulesSkipped: skipRules,
     cwd: base.cwd,
     mcpConfig,
     permission: base.permission ?? DEFAULT_PERMISSION,
@@ -1388,7 +1404,7 @@ async function commandResult(positional, flags) {
   const file = resultFile(jobId)
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
   if (flags.json === true) {
-    const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, model: job.model ?? null, effort: job.effort ?? null, modelSelection: job.modelSelection ?? null, result: text }
+    const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, model: job.model ?? null, effort: job.effort ?? null, modelSelection: job.modelSelection ?? null, projectRules: job.projectRules ?? null, result: text }
     print(payload, true)
     return job.state === 'error' ? 1 : 0
   }
@@ -2080,6 +2096,17 @@ async function commandDoctor(_positional, flags) {
 
   // The orchestrator rule lives in the project's own instruction files; a
   // hand-written rule counts, so this only fails when the project has neither.
+  // Informational: a project without a rules file is valid, its jobs simply
+  // get the prompt as written.
+  const rulesCwd = typeof flags.cwd === 'string' ? flags.cwd : DEFAULT_CWD
+  const rulesTop = fs.existsSync(rulesCwd) ? gitTopLevel(rulesCwd) : null
+  const projectRules = rulesTop === null ? null : findProjectRules(rulesCwd)
+  push('project rules file', true, projectRules !== null
+    ? `${projectRules.path} sha256=${projectRules.sha256} — start and resume in ${rulesCwd} tell the job to read it first`
+    : rulesTop === null
+      ? `none — ${rulesCwd} is not inside a git work tree`
+      : `none — no ${path.join(rulesTop, PROJECT_RULES_RELATIVE)}; jobs get the prompt as written`)
+
   const ruleFiles = orchestratorRuleFiles(PROJECT_ROOT)
   const ruleFile = ruleFiles.find(file => fs.existsSync(file) && hasOrchestratorRule(fs.readFileSync(file, 'utf8')))
   push('orchestrator rule', ruleFile !== undefined, ruleFile
@@ -2143,7 +2170,8 @@ function commandWindow(_positional, flags) {
 function usage() {
   process.stdout.write(`dsh-offload — background DeepSeek delegation through the MCP bridge
 
-  doctor [--json]              verify bridge, DSH_HOME, acp model, MCP config and job store
+  doctor [--cwd DIR] [--json]  verify bridge, DSH_HOME, acp model, MCP config and job store,
+                               and name the project rules file jobs in DIR would read
   window [--tz IANA] [--json]  DeepSeek peak/off-peak status now, and when it next flips
   start "<prompt>" [flags]     launch a background job; prints job id + session id
                                  --prompt-file FILE, -f FILE   read the prompt from FILE
@@ -2170,6 +2198,10 @@ function usage() {
                                  --timeout-ms N  --detach  --wait-session-ms N  --json
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
+                                 --no-project-rules  do not point the job at the
+                                   project rules file (default: when <git toplevel of
+                                   --cwd>/${PROJECT_RULES_RELATIVE} exists, the prompt
+                                   starts with one line telling the job to read it first)
   resume <jobId> ["<extra>"]   continue an interrupted job's session in a new job
                                  (same cwd, guards and history; the agent re-checks
                                  the workspace first). --prompt-file FILE, -f FILE
@@ -2177,6 +2209,8 @@ function usage() {
                                  (use it for any text with backticks). --session ID --cwd DIR resumes
                                  a session with no job record; --label --timeout-ms
                                  --read-only --allow-git-write --mcp-config
+                                 --no-project-rules (the rules line is added again,
+                                   from the file's current content)
                                  --model --effort (default: the original job's; a
                                    job that ran on v4-pro resumes on deepseek-flash) --json
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
