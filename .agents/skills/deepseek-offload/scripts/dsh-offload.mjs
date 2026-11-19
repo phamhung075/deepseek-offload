@@ -23,10 +23,12 @@
  *   node dsh-offload.mjs start --prompt-file FILE|-f FILE   # read the prompt from a file
  *   node dsh-offload.mjs start -                          # read the prompt from stdin
  *   node dsh-offload.mjs resume <jobId> ["<extra instructions>"] | resume --session ID --cwd DIR
+ *   node dsh-offload.mjs resume <jobId> --prompt-file FILE|-f FILE|-   # extra instructions from a file or stdin
  *   node dsh-offload.mjs status <jobId>
  *   node dsh-offload.mjs result <jobId>
  *   node dsh-offload.mjs wait   <jobId> [--timeout-ms N]
  *   node dsh-offload.mjs update <jobId> "<new information>"
+ *   node dsh-offload.mjs update <jobId> --prompt-file FILE|-f FILE|-   # message from a file or stdin
  *   node dsh-offload.mjs cancel <jobId>
  *   node dsh-offload.mjs list   [--all]
  *   node dsh-offload.mjs sessions [--cwd DIR]
@@ -45,7 +47,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
-import { resolvePromptFile } from './lib/prompt-file.mjs'
+import { readPromptText } from './lib/prompt-file.mjs'
 import { resolveModelFlags, describeModelLines, ModelFlagError, isBlockedModel, JOB_MODELS, SAFE_MODEL } from './lib/model-effort.mjs'
 import { jobSocketPath } from './lib/job-socket.mjs'
 import { recordJobStore, lookupJobStore } from './lib/job-index.mjs'
@@ -1125,19 +1127,10 @@ function launchWorker(record) {
 
 async function commandStart(positional, flags) {
   ensureDirs()
-  const promptFile = resolvePromptFile(flags)
-  let prompt = positional.join(' ').trim()
-  if (promptFile !== null) {
-    if (!fs.existsSync(promptFile)) fail(`prompt file not found: ${promptFile}`)
-    prompt = fs.readFileSync(promptFile, 'utf8').trim()
-  }
   // `-` and an empty prompt on a non-interactive stdin both mean "read it from
-  // the pipe". The stdin read is what keeps a multi-line prompt out of the
-  // shell, where backticks would be evaluated as subcommands before the runner
-  // ever sees the text.
-  if (prompt === '-' || (prompt === '' && !process.stdin.isTTY)) {
-    prompt = fs.readFileSync(0, 'utf8').trim()
-  }
+  // the pipe"; `--prompt-file` reads a file. Both keep a multi-line prompt out
+  // of the shell, where backticks would be evaluated as subcommands.
+  const prompt = readPromptText(flags, positional, { fail, implicitStdin: true })
   const cwd = typeof flags.cwd === 'string' ? flags.cwd : DEFAULT_CWD
   if (prompt === '') fail('start requires a prompt: dsh-offload start "<self-contained task>" or --prompt-file <path>')
   if (flags['read-only'] === true && flags['allow-git-write'] === true) {
@@ -1266,7 +1259,7 @@ async function commandResume(positional, flags) {
     if (!isAbsolutePath(cwd)) fail(`--cwd must be absolute: ${cwd}`)
     if (!fs.existsSync(cwd)) fail(`--cwd does not exist: ${cwd}`)
     sessionId = flags.session
-    extra = positional.join(' ').trim()
+    extra = readPromptText(flags, positional, { fail })
     base = {
       label: null,
       cwd,
@@ -1288,7 +1281,7 @@ async function commandResume(positional, flags) {
         + `find it with \`sessions --cwd ${source.cwd}\`, then \`resume --session <id> --cwd ${source.cwd}\``)
     }
     sessionId = source.sessionId
-    extra = positional.slice(1).join(' ').trim()
+    extra = readPromptText(flags, positional.slice(1), { fail })
     base = source
   }
 
@@ -1471,9 +1464,9 @@ function readSandboxRefs(sandbox) {
 async function commandUpdate(positional, flags) {
   ensureDirs()
   const jobId = positional[0]
-  const message = positional.slice(1).join(' ').trim()
-  if (jobId === undefined) fail('update requires a job id: dsh-offload update <jobId> "<new information>"')
-  if (message === '') fail(`update requires a message: dsh-offload update ${jobId} "<new information>"`)
+  if (jobId === undefined) fail('update requires a job id: dsh-offload update <jobId> "<new information>" (or --prompt-file FILE, or - for stdin)')
+  const message = readPromptText(flags, positional.slice(1), { fail })
+  if (message === '') fail(`update requires a message: dsh-offload update ${jobId} "<new information>" (or --prompt-file FILE, or - for stdin)`)
   const job = reconcileJob(readJob(jobId))
   if (job.state !== 'running') {
     const hint = job.state === 'scheduled' ? ' (still waiting for its off-peak window — use `cancel` to drop it instead)' : ''
@@ -2179,7 +2172,9 @@ function usage() {
                                    off-peak before running (half price); no-op if already off-peak
   resume <jobId> ["<extra>"]   continue an interrupted job's session in a new job
                                  (same cwd, guards and history; the agent re-checks
-                                 the workspace first). --session ID --cwd DIR resumes
+                                 the workspace first). --prompt-file FILE, -f FILE
+                                 or - (stdin) give the extra text without the shell
+                                 (use it for any text with backticks). --session ID --cwd DIR resumes
                                  a session with no job record; --label --timeout-ms
                                  --read-only --allow-git-write --mcp-config
                                  --model --effort (default: the original job's; a
@@ -2192,6 +2187,8 @@ function usage() {
   wait   <jobId> [--timeout-ms N] [--json]
                                block until the job settles, then print the result
   update <jobId> "<new info>" [--json]  steer a running job onto the right track
+                                 --prompt-file FILE, -f FILE, or - (stdin) give the
+                                 message without the shell (use it for backticks)
   cancel <jobId> [--json]      stop a running job outright, no redirect
   list   [--all] [--json]      recent jobs
   sessions [--cwd DIR] [--json]     sessions in the shared DSH store (what the GUI shows)

@@ -330,9 +330,11 @@ node "$OFF" start - --cwd "$PWD" < task.md                                 # pro
 node "$OFF" status  <jobId>
 node "$OFF" result  <jobId>
 node "$OFF" guard   <jobId>               # did the job try to commit or push, and where did it land?
-node "$OFF" update  <jobId> "<new information / corrected direction>"
+node "$OFF" update  <jobId> "<new information / corrected direction>"   # plain text only
+node "$OFF" update  <jobId> -f note.md    # any text with backticks: from a file (or `- < note.md`)
 node "$OFF" cancel  <jobId>               # stop outright, no redirect
 node "$OFF" resume  <jobId> ["<extra>"]    # continue an interrupted job's session in a new job
+node "$OFF" resume  <jobId> -f extra.md   # extra instructions with backticks: from a file (or `- < extra.md`)
 node "$OFF" wait    <jobId> --timeout-ms 900000
 node "$OFF" list    --all
 node "$OFF" sessions --cwd "$PWD"        # sessions in the shared store the GUI lists
@@ -340,8 +342,9 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 ```
 
 > [!IMPORTANT]
-> **Pass multi-line prompts with `--prompt-file FILE` (or `-f FILE`), never as a quoted shell
-> argument.** A prompt that contains backticks or a fenced code block (`` ``` ``) is evaluated by
+> **Pass multi-line text, and any text with a backtick, with `--prompt-file FILE` (or `-f FILE`),
+> never as a quoted shell argument.** This holds for all three commands that take text: `start`'s
+> prompt, `resume`'s extra instructions and `update`'s message. A prompt that contains backticks or a fenced code block (`` ``` ``) is evaluated by
 > bash **before** the runner ever sees it: every backtick span is executed as command substitution
 > and replaced by its output, so the child receives a mangled prompt and the shell may run commands
 > you never intended. Write the prompt to a file and pass its path, or pipe it on stdin with `-`:
@@ -349,11 +352,14 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 > ```sh
 > node "$OFF" start --prompt-file task.md --label safe   # or: -f task.md
 > node "$OFF" start - < task.md                          # or: no prompt argument, piped stdin
+> node "$OFF" resume <jobId> -f extra.md                 # or: resume <jobId> - < extra.md
+> node "$OFF" update <jobId> -f note.md                  # or: update <jobId> - < note.md
 > ```
 >
 > `--prompt-file <path>` reads the file as UTF-8 and trims it; a missing file fails with
 > `prompt file not found: <path>` (exit 1) before any job is recorded. `-` (or an empty prompt with a
-> non-interactive stdin) reads the prompt from stdin. `deepseek-offload.mjs` is an alias symlink of
+> non-interactive stdin, `start` only) reads the prompt from stdin; `resume` and `update` read stdin
+only for an explicit `-`. Text given both as an argument and with `--prompt-file` is refused (exit 1). `deepseek-offload.mjs` is an alias symlink of
 > `dsh-offload.mjs` — either name runs the identical runner.
 
 | Command | Behaviour | Exit code |
@@ -364,9 +370,9 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 | `status` | Job state, session id, elapsed time; `--log` adds the worker log. | `0` |
 | `result` | Final report text, then the deterministic failure-triage block when the job ended in error (a code rule matches the recorded error and names the next step; it never resumes anything). `--json` carries the structured result. | `0` done, `1` error, `2` still running |
 | `guard` | The job's git write guard state, plus any refs a guarded push landed in the sandbox instead of the real remote. | `0` |
-| `update` | Relays new information to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). The socket sits next to the job record; when that path would pass the 108-byte Unix socket limit (a deep checkout such as a 4genthub seat worktree), it goes to `$XDG_RUNTIME_DIR/dsh-offload/` or `/tmp/dsh-offload-<uid>/` instead, and the job record's `socketPath` names it. Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
+| `update` | Relays new information (the trailing text, `--prompt-file FILE` / `-f FILE`, or `-` for stdin) to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). The socket sits next to the job record; when that path would pass the 108-byte Unix socket limit (a deep checkout such as a 4genthub seat worktree), it goes to `$XDG_RUNTIME_DIR/dsh-offload/` or `/tmp/dsh-offload-<uid>/` instead, and the job record's `socketPath` names it. Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
-| `resume` | Continues a finished, failed, or interrupted job's DeepSeek session in a **new** job through ACP `session/resume`: same session id, conversation history, `cwd`, git write guard, and file policy. The first turn tells the agent its run was interrupted, to re-check the workspace for partial edits, and to finish the original task; trailing text is appended as extra instructions. Refuses a job that is still active (worker alive) or never recorded a session id; `--session ID --cwd DIR` resumes a session found with `sessions` that has no job record. The new job records `resumeOf`, the original `resumedBy`. | `0` launched, `1` refused |
+| `resume` | Continues a finished, failed, or interrupted job's DeepSeek session in a **new** job through ACP `session/resume`: same session id, conversation history, `cwd`, git write guard, and file policy. The first turn tells the agent its run was interrupted, to re-check the workspace for partial edits, and to finish the original task; trailing text, `--prompt-file FILE` / `-f FILE`, or `-` (stdin) is appended as extra instructions. Refuses a job that is still active (worker alive) or never recorded a session id; `--session ID --cwd DIR` resumes a session found with `sessions` that has no job record. The new job records `resumeOf`, the original `resumedBy`. | `0` launched, `1` refused |
 | `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
 | `list` | Recent jobs, newest first; `--all` for every job. | `0` |
 | `sessions` | Raw session list for the shared store. | `0` |
@@ -375,7 +381,7 @@ node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the ch
 Every command accepts `--json`. Flags by command: `--cwd DIR` (start, resume, sessions),
 `--mcp-config FILE` (start, resume, mcp-servers), `--label NAME` and `--timeout-ms N`
 (start, resume; `wait` takes `--timeout-ms` too), `--read-only` / `--allow-git-write`
-(start, resume), `--session ID` (resume), `--prompt-file FILE` / `-f FILE`,
+(start, resume), `--session ID` (resume), `--prompt-file FILE` / `-f FILE` (start, resume, update),
 `--permission allow|reject`, `--detach`, `--wait-session-ms N`, and `--defer-to-off-peak`
 (start only), `--all` (list, sync-workspace), `--dry-run` and `--wait-ms N`
 (sync-workspace), `--log` (status), `--tz IANA_NAME` (window), and `--model ID` / `--effort LEVEL` (start, resume;
@@ -559,4 +565,4 @@ original session in the GUI.
 - [../../mcp-deepseek/server.cjs](../../mcp-deepseek/server.cjs) — the bridge itself.
 - [../../mcp-deepseek/git-guard.cjs](../../mcp-deepseek/git-guard.cjs) — the git write guard the bridge installs before spawning a job.
 - [../../mcp-deepseek/README.md](../../mcp-deepseek/README.md) — bridge setup and env vars.
-- [scripts/lib/](scripts/lib/) — shared helpers the runner imports: `prompt-file.mjs` (resolve a `--prompt-file` work order) and `triage.mjs` (the deterministic failure-triage rules).
+- [scripts/lib/](scripts/lib/) — shared helpers the runner imports: `prompt-file.mjs` (read the text of `start`, `resume` and `update` from the arguments, `--prompt-file` or stdin) and `triage.mjs` (the deterministic failure-triage rules).
