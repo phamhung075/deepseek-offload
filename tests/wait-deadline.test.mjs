@@ -19,24 +19,24 @@ import { jobSettleDeadline, WAIT_MARGIN_MS, WAIT_TIMED_OUT_EXIT } from '../.agen
 const RUNNER = fileURLToPath(new URL('../.agents/skills/deepseek-offload/scripts/dsh-offload.mjs', import.meta.url))
 const SKILL = fileURLToPath(new URL('../.agents/skills/deepseek-offload/SKILL.md', import.meta.url))
 const MIN = 60_000
-const BOUNDS = { defaultTimeoutMs: 15 * MIN, bootGraceMs: 10 * MIN }
+const BOUNDS = { defaultTimeoutMs: 15 * MIN }
 
-test('a 45-minute job is waited on past 45 minutes, not a fixed 15', () => {
+test('a 45-minute job is waited on until its wall-clock bound, not a fixed 15', () => {
   const now = 1_000_000_000
   const deadline = jobSettleDeadline({ startedAt: now, timeoutMs: 45 * MIN }, now, BOUNDS)
   assert.ok(deadline - now > 45 * MIN)
-  assert.equal(deadline - now, 45 * MIN + 10 * MIN + WAIT_MARGIN_MS)
+  assert.equal(deadline - now, 45 * MIN + WAIT_MARGIN_MS)
 })
 
 test('a deferred job counts from its off-peak wake', () => {
   const now = 1_000_000_000
   const deadline = jobSettleDeadline({ startedAt: now, deferredUntil: now + 120 * MIN, timeoutMs: 45 * MIN }, now, BOUNDS)
-  assert.equal(deadline, now + 120 * MIN + 45 * MIN + 10 * MIN + WAIT_MARGIN_MS)
+  assert.equal(deadline, now + 120 * MIN + 45 * MIN + WAIT_MARGIN_MS)
 })
 
 test('a record without timeoutMs uses the default, and a late waiter still waits the margin', () => {
   const now = 1_000_000_000
-  assert.equal(jobSettleDeadline({ startedAt: now }, now, BOUNDS), now + 25 * MIN + WAIT_MARGIN_MS)
+  assert.equal(jobSettleDeadline({ startedAt: now }, now, BOUNDS), now + 15 * MIN + WAIT_MARGIN_MS)
   assert.equal(jobSettleDeadline({ startedAt: now - 10 * 60 * MIN, timeoutMs: MIN }, now, BOUNDS), now + WAIT_MARGIN_MS)
 })
 
@@ -91,5 +91,5 @@ test('wait without --timeout-ms on a 45-minute job waits until its own bound, no
       }
     })
   })
-  assert.match(out, /^waiting {3}for the job to settle, up to 5[67]m\d\ds .*then exit 2/m)
+  assert.match(out, /^waiting {3}for the job to settle, up to 4[67]m\d\ds .*then exit 2/m)
 })

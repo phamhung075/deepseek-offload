@@ -150,7 +150,7 @@ node "$R" start "<prompt>" [--prompt-file FILE] [-f FILE] [--cwd DIR]
                            [--allow-git-write] [--wait-session-ms N] [--json]
 node "$R" wait   <jobId> [--timeout-ms N] [--json]
                                         print the header, then block until the job settles
-                                        (default limit: the job's timeout + 12 min; exit 2
+                                        (default limit: the job's timeout + 2 min; exit 2
                                         when it gives up with the job still running)
 node "$R" update <jobId> "<new info>"   steer a running job
 node "$R" cancel <jobId>                stop it outright
@@ -243,7 +243,7 @@ Bridge and runner environment (all optional):
 | `DEEPSEEK_MCP_PERMISSION` | `allow` (default) auto-accepts prompts; `reject` denies them. |
 | `DEEPSEEK_MCP_CONFIG` | MCP config forwarded into delegated sessions. |
 | `DEEPSEEK_MCP_SKIP` | Server names never forwarded. |
-| `DEEPSEEK_MCP_TIMEOUT_MS` | Per-turn timeout. Default 15 min. |
+| `DEEPSEEK_MCP_TIMEOUT_MS` | Default `--timeout-ms` of a background job (wall clock from its start, boot included; the job ends `timed_out`), and the bridge's per-turn timeout for a direct `deepseek_agent` call. Default 15 min. |
 | `DEEPSEEK_MCP_INIT_TIMEOUT_MS`, `DEEPSEEK_MCP_INIT_ATTEMPTS` | How long one `dsh` boot may take, and how many boots to try when it times out. Default 120 s, 3 attempts. |
 | `DEEPSEEK_MCP_ALLOW_GIT_WRITE` | `1` lets a delegated job commit and push. Default: the git write guard refuses both. |
 | `DEEPSEEK_MCP_READ_ONLY` | `1` pins every delegated job to the `read-only` file policy, so it cannot modify a file. Default: unset (`workspace-write`). |

@@ -50,7 +50,7 @@ import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
 import { readPromptText } from './lib/prompt-file.mjs'
 import { resolveModelFlags, describeModelLines, ModelFlagError, isBlockedModel, JOB_MODELS, SAFE_MODEL } from './lib/model-effort.mjs'
 import { jobSocketPath } from './lib/job-socket.mjs'
-import { jobSettleDeadline, WAIT_TIMED_OUT_EXIT } from './lib/wait-deadline.mjs'
+import { jobRunBegin, jobSettleDeadline, jobWallDeadline, stopLeadMs, WAIT_TIMED_OUT_EXIT } from './lib/wait-deadline.mjs'
 import { recordJobStore, lookupJobStore } from './lib/job-index.mjs'
 import {
   appendControlLine,
@@ -100,7 +100,7 @@ function followCommand(jobId) {
 const SESSION_DISCOVERY_TIMEOUT_MS = 90_000
 // A bridge call that boots the ACP child may repeat that boot (three attempts of
 // 120 s by default), so its deadline here has to outlast them all. This is only the
-// watchdog on the bridge: the per-turn timeout lives in the bridge itself.
+// watchdog on the bridge call: a job's own bound is its wall-clock deadline (runWorker).
 const BRIDGE_BOOT_GRACE_MS = 10 * 60_000
 const POLL_INTERVAL_MS = 3_000
 
@@ -234,6 +234,11 @@ function isActiveState(state) {
   return ACTIVE_STATES.has(state)
 }
 
+/** A settled job whose result is not a finished answer: `result` and `wait` exit 1. */
+function isFailedState(state) {
+  return state === 'error' || state === 'timed_out'
+}
+
 // ---------------------------------------------------------------------------
 // DeepSeek peak/off-peak window math
 // ---------------------------------------------------------------------------
@@ -308,7 +313,11 @@ function print(value, asJson) {
 // MCP client over the existing bridge
 // ---------------------------------------------------------------------------
 class Bridge {
-  constructor({ permission = DEFAULT_PERMISSION, timeoutMs = DEFAULT_TIMEOUT_MS, onProgress = null, env = null } = {}) {
+  /**
+   * @param options - `ownGroup` puts the bridge and its ACP child in a process group
+   *   of their own, so `killTree` stops both without touching this process.
+   */
+  constructor({ permission = DEFAULT_PERMISSION, timeoutMs = DEFAULT_TIMEOUT_MS, onProgress = null, env = null, ownGroup = false } = {}) {
     this.pending = new Map()
     this.nextId = 1
     this.buffer = ''
@@ -325,7 +334,9 @@ class Bridge {
         ...env,
       },
       stdio: ['pipe', 'pipe', 'inherit'],
+      detached: ownGroup,
     })
+    this.ownGroup = ownGroup
     this.child.stdout.setEncoding('utf8')
     this.child.stdout.on('data', (chunk) => this.#onData(chunk))
     this.child.on('error', (error) => this.#failAll(error))
@@ -439,6 +450,16 @@ class Bridge {
     const { text, isError, raw } = await this.callTool(name, args, options)
     if (isError) throw new Error(text.replace(/^Error:\s*/, ''))
     return { text, raw }
+  }
+
+  /** SIGKILL the bridge, and its ACP child when the bridge owns its process group. */
+  killTree() {
+    if (this.exited) return
+    try {
+      process.kill(this.ownGroup ? -this.child.pid : this.child.pid, 'SIGKILL')
+    } catch {
+      /* already gone */
+    }
   }
 
   dispose() {
@@ -881,6 +902,9 @@ function sendSocketRequest(sockPath, payload, timeoutMs = 10_000) {
 async function runWorker(jobId) {
   const job = readJob(jobId)
   const startedAt = job.startedAt
+  const timeoutMs = typeof job.timeoutMs === 'number' ? job.timeoutMs : DEFAULT_TIMEOUT_MS
+  const wall = { deadline: jobWallDeadline(job, Date.now(), DEFAULT_TIMEOUT_MS), lead: stopLeadMs(timeoutMs), expired: false, timer: null, agentCall: null }
+  let announced = null
   let bridge
   let updateServer
   let socketPath
@@ -898,13 +922,20 @@ async function runWorker(jobId) {
       updateJob(jobId, { state: 'starting', wokeAt: Date.now() })
     }
 
+    // `--timeout-ms` is wall clock from the run's begin, boot included: the stop
+    // starts `lead` early so the job has settled by the deadline itself.
+    wall.timer = setTimeout(() => {
+      wall.expired = true
+      stopAtWallClock(jobId, wall, bridge, () => announced).catch(() => {})
+    }, Math.max(0, wall.deadline - wall.lead - Date.now()))
+
     // The bridge announces the id of the session it created as a progress
     // message (`session=<id>`). That is the job's own session; diffing session
     // lists cannot tell two jobs started together in one cwd apart.
-    let announced = null
     bridge = new Bridge({
+      ownGroup: true,
       permission: job.permission,
-      timeoutMs: job.timeoutMs,
+      timeoutMs,
       // The CLI flag is the authority, so the variable is set either way: a
       // caller with DEEPSEEK_MCP_ALLOW_GIT_WRITE=1 exported cannot silently
       // unguard a job started without `--allow-git-write`.
@@ -925,6 +956,7 @@ async function runWorker(jobId) {
         }
       },
     })
+    updateJob(jobId, { bridgePid: bridge.child.pid })
     await bridge.initialize()
     updateServer = await startUpdateSocket(jobId, bridge)
     socketPath = updateServer.address()
@@ -944,7 +976,7 @@ async function runWorker(jobId) {
     if (typeof job.model === 'string') agentArgs.model = job.model
     if (typeof job.effort === 'string') agentArgs.reasoningEffort = job.effort
     const agentCall = bridge
-      .callTool('deepseek_agent', agentArgs, { timeoutMs: job.timeoutMs + BRIDGE_BOOT_GRACE_MS, progressToken: 'dsh-offload' })
+      .callTool('deepseek_agent', agentArgs, { timeoutMs: timeoutMs + BRIDGE_BOOT_GRACE_MS, progressToken: 'dsh-offload' })
       // An MCP-level failure arrives as a successful result carrying isError:
       // without this check a dead job would be recorded as a finished one, with
       // the error text handed back as if it were an answer.
@@ -952,6 +984,7 @@ async function runWorker(jobId) {
         ? { error: new Error(value.text.replace(/^Error:\s*/, '')) }
         : { value }))
       .catch((error) => ({ error }))
+    wall.agentCall = agentCall
 
     // Discover the new session id while the agent works, so the caller can be
     // sent to the web GUI before the job finishes.
@@ -959,7 +992,8 @@ async function runWorker(jobId) {
     const discoveryDeadline = discoveryStartedAt + SESSION_DISCOVERY_TIMEOUT_MS
     let discovered = resumeSessionId
     while (Date.now() < discoveryDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+      // The poll ends early when the call settles, so a stop is recorded at once.
+      await Promise.race([agentCall, new Promise((resolve) => { setTimeout(resolve, POLL_INTERVAL_MS) })])
       if (discovered === null && announced !== null) {
         discovered = announced
         updateJob(jobId, { sessionId: discovered, sessionDiscoveredAt: Date.now() })
@@ -991,6 +1025,15 @@ async function runWorker(jobId) {
 
     const outcome = await agentCall
     const finishedAt = Date.now()
+    if (wall.expired) {
+      const partial = outcome.error ? parseAgentResult(outcome.error.message || String(outcome.error)) : parseAgentResult(outcome.value.text)
+      recordWallTimeout(jobId, job, wall, {
+        sessionId: partial.sessionId ?? announced ?? discovered,
+        body: outcome.error ? '' : partial.body,
+        finishedAt,
+      })
+      return 1
+    }
     if (outcome.error) {
       const message = outcome.error.message || String(outcome.error)
       const failure = parseAgentResult(message)
@@ -1031,12 +1074,14 @@ async function runWorker(jobId) {
   } catch (error) {
     const message = error && error.message ? error.message : String(error)
     try {
-      updateJob(jobId, { state: 'error', error: message, finishedAt: Date.now() })
+      if (wall.expired) recordWallTimeout(jobId, job, wall, { sessionId: announced, body: '', finishedAt: Date.now() })
+      else updateJob(jobId, { state: 'error', error: message, finishedAt: Date.now() })
     } catch {
       /* the job file may be unreadable if it was deleted mid-run */
     }
     return 1
   } finally {
+    clearTimeout(wall.timer)
     unpublishWorkerLiveness(livenessFile)
     let sockPath
     if (updateServer !== undefined) {
@@ -1054,6 +1099,56 @@ async function runWorker(jobId) {
 }
 
 const SYMBOL_PENDING = Symbol('pending')
+
+/**
+ * Stop a job at its wall-clock deadline: ask its session to cancel, which keeps the
+ * partial answer, then kill the bridge and its ACP child if the turn has not ended
+ * by half the lead. Files the agent already wrote stay in the job's cwd.
+ * @param jobId - the job.
+ * @param wall - the worker's deadline state (`lead`, `agentCall`).
+ * @param bridge - the job's bridge, or undefined before it spawned.
+ * @param announcedSession - the session id the bridge announced, if any.
+ */
+async function stopAtWallClock(jobId, wall, bridge, announcedSession) {
+  if (bridge === undefined) return
+  let sessionId = announcedSession()
+  try {
+    sessionId = sessionId ?? readJob(jobId).sessionId ?? null
+  } catch {
+    /* fall through to the kill */
+  }
+  const halfLead = Math.max(100, Math.floor(wall.lead / 2))
+  if (sessionId !== null && wall.agentCall !== null) {
+    bridge.callTool('deepseek_update_session', { sessionId }, { timeoutMs: halfLead }).catch(() => {})
+    const settled = await Promise.race([wall.agentCall, new Promise((resolve) => { setTimeout(() => resolve(SYMBOL_PENDING), halfLead) })])
+    if (settled !== SYMBOL_PENDING) return
+  }
+  bridge.killTree()
+}
+
+/**
+ * Record a job stopped at its wall-clock deadline.
+ * @param jobId - the job.
+ * @param job - the record the worker started from.
+ * @param wall - the worker's deadline state.
+ * @param outcome - `sessionId`, the partial answer `body`, and `finishedAt`.
+ */
+function recordWallTimeout(jobId, job, wall, { sessionId, body, finishedAt }) {
+  const begin = typeof job.deferredUntil === 'number' ? 'its off-peak wake' : 'its start'
+  const message = `stopped at the --timeout-ms wall-clock limit: ${humanDuration(wall.deadline - jobRunBegin(job, finishedAt))} `
+    + `after ${begin}, boot included; files it wrote are left in ${job.cwd}; \`resume ${jobId}\` continues the session`
+  fs.writeFileSync(resultFile(jobId), body === '' ? `${message}\n` : `${body}\n\n---\n${message}\n`)
+  updateJob(jobId, {
+    state: 'timed_out',
+    stopReason: 'wall_timeout',
+    error: message,
+    sessionId: sessionId ?? null,
+    finishedAt,
+    elapsedMs: finishedAt - job.startedAt,
+    resultChars: body.length,
+    resultFile: path.relative(PROJECT_ROOT, resultFile(jobId)),
+  })
+}
 // The bridge's `session=<id>` progress message (server.cjs onSessionId).
 const SESSION_ANNOUNCE_PATTERN = /^session=(\S+)$/
 // How long the worker waits for that announcement before it falls back to
@@ -1217,7 +1312,7 @@ async function commandStart(positional, flags) {
   while (job.sessionId === null && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1_000))
     job = readJob(jobId)
-    if (job.state === 'done' || job.state === 'error') break
+    if (!isActiveState(job.state)) break
   }
 
   if (flags.json === true) {
@@ -1407,7 +1502,7 @@ async function commandResult(positional, flags) {
   if (flags.json === true) {
     const payload = { jobId, state: job.state, sessionId: job.sessionId, stopReason: job.stopReason ?? null, elapsedMs: job.elapsedMs ?? null, model: job.model ?? null, effort: job.effort ?? null, modelSelection: job.modelSelection ?? null, projectRules: job.projectRules ?? null, result: text }
     print(payload, true)
-    return job.state === 'error' ? 1 : 0
+    return isFailedState(job.state) ? 1 : 0
   }
   if (isActiveState(job.state)) {
     process.stdout.write(`job ${jobId} is still ${job.state}; no result yet.\n${describeJob(job)}\n`)
@@ -1422,7 +1517,7 @@ async function commandResult(positional, flags) {
       /* triage is advisory; it never changes the result */
     }
   }
-  return job.state === 'error' ? 1 : 0
+  return isFailedState(job.state) ? 1 : 0
 }
 
 /**
@@ -1606,6 +1701,7 @@ async function commandCancel(positional, flags) {
 
   // The graceful path failed (no live socket, or the bridge rejected it) — force-stop.
   if (typeof job.pid === 'number') await forceKillWorkerTree(job.pid)
+  if (typeof job.bridgePid === 'number') await forceKillWorkerTree(job.bridgePid)
   updateJob(jobId, { state: 'cancelled', error: null, finishedAt: Date.now() })
   try {
     fs.unlinkSync(jobSocketFile(jobId, job))
@@ -1629,7 +1725,7 @@ async function commandWait(positional, flags) {
   let job = reconcileJob(readJob(jobId))
   const deadline = typeof flags['timeout-ms'] === 'string'
     ? Date.now() + Number(flags['timeout-ms'])
-    : jobSettleDeadline(job, Date.now(), { defaultTimeoutMs: DEFAULT_TIMEOUT_MS, bootGraceMs: BRIDGE_BOOT_GRACE_MS })
+    : jobSettleDeadline(job, Date.now(), { defaultTimeoutMs: DEFAULT_TIMEOUT_MS })
   const timeoutMs = deadline - Date.now()
   // A wait can last as long as the job does, and a caller watching this
   // process (a terminal, an agent's shell panel) sees nothing until it exits.
@@ -2201,7 +2297,10 @@ function usage() {
                                  --effort none|low|high|max  thinking effort (default
                                    high; none disables thinking). Higher effort costs
                                    more: see the skill's model table
-                                 --timeout-ms N  --detach  --wait-session-ms N  --json
+                                 --timeout-ms N  wall-clock cap from the start (from the
+                                   off-peak wake when deferred), boot included; the job is
+                                   stopped and ends timed_out, its files left in the cwd
+                                 --detach  --wait-session-ms N  --json
                                  --defer-to-off-peak   if pricing is peak now, wait for
                                    off-peak before running (half price); no-op if already off-peak
                                  --no-project-rules  do not point the job at the
@@ -2214,6 +2313,7 @@ function usage() {
                                  or - (stdin) give the extra text without the shell
                                  (use it for any text with backticks). --session ID --cwd DIR resumes
                                  a session with no job record; --label --timeout-ms
+                                   (the same wall-clock cap, from the resume)
                                  --read-only --allow-git-write --mcp-config
                                  --no-project-rules (the rules line is added again,
                                    from the file's current content)
@@ -2221,12 +2321,13 @@ function usage() {
                                    job that ran on v4-pro resumes on deepseek-flash) --json
   status <jobId> [--json] [--log]   job state, session id and GUI follow-up
   result <jobId> [--json]      final report text, plus the deterministic failure
-                               triage when the job ended in error
+                               triage when the job ended in error; exit 1 for
+                               error and timed_out
   guard  <jobId> [--json]      git write guard state, and any refs the job pushed
                                into its sandbox instead of the real remote
   wait   <jobId> [--timeout-ms N] [--json]
                                block until the job settles, then print the result;
-                               default limit is the job's own timeout + 12 min;
+                               default limit is the job's own timeout + 2 min;
                                exit 2 when it gives up with the job still running
   update <jobId> "<new info>" [--json]  steer a running job onto the right track
                                  --prompt-file FILE, -f FILE, or - (stdin) give the
