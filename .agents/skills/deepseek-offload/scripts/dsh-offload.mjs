@@ -50,6 +50,7 @@ import { parseArgs, specForCommand } from './lib/cli-flags.mjs'
 import { readPromptText } from './lib/prompt-file.mjs'
 import { resolveModelFlags, describeModelLines, ModelFlagError, isBlockedModel, JOB_MODELS, SAFE_MODEL } from './lib/model-effort.mjs'
 import { jobSocketPath } from './lib/job-socket.mjs'
+import { jobSettleDeadline, WAIT_TIMED_OUT_EXIT } from './lib/wait-deadline.mjs'
 import { recordJobStore, lookupJobStore } from './lib/job-index.mjs'
 import {
   appendControlLine,
@@ -1625,22 +1626,27 @@ async function commandWait(positional, flags) {
   ensureDirs()
   const jobId = positional[0]
   if (jobId === undefined) fail('wait requires a job id')
-  const timeoutMs = Number(typeof flags['timeout-ms'] === 'string' ? flags['timeout-ms'] : 15 * 60 * 1000)
-  const deadline = Date.now() + timeoutMs
   let job = reconcileJob(readJob(jobId))
+  const deadline = typeof flags['timeout-ms'] === 'string'
+    ? Date.now() + Number(flags['timeout-ms'])
+    : jobSettleDeadline(job, Date.now(), { defaultTimeoutMs: DEFAULT_TIMEOUT_MS, bootGraceMs: BRIDGE_BOOT_GRACE_MS })
+  const timeoutMs = deadline - Date.now()
   // A wait can last as long as the job does, and a caller watching this
   // process (a terminal, an agent's shell panel) sees nothing until it exits.
   // Print the header at once — the session id and follow link are the point of
   // waiting — then one line per state change and a heartbeat every 15s.
   const human = flags.json !== true
-  if (human) process.stdout.write(`${describeJob(job, { full: true })}\n\nwaiting   for the job to settle; Ctrl-C stops waiting, not the job\n`)
+  if (human) {
+    process.stdout.write(`${describeJob(job, { full: true })}\n\nwaiting   for the job to settle, up to ${humanDuration(timeoutMs)} `
+      + `(until ${new Date(deadline).toISOString()}, then exit ${WAIT_TIMED_OUT_EXIT}); Ctrl-C stops waiting, not the job\n`)
+  }
 
   let lastState = job.state
   let lastLine = Date.now()
   while (isActiveState(job.state)) {
     if (Date.now() > deadline) {
-      process.stderr.write(`dsh-offload: wait timed out after ${timeoutMs}ms; job ${jobId} is still running.\n`)
-      return 2
+      process.stderr.write(`dsh-offload: wait timed out after ${timeoutMs}ms; job ${jobId} is still ${job.state} (exit ${WAIT_TIMED_OUT_EXIT}).\n`)
+      return WAIT_TIMED_OUT_EXIT
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000))
     job = reconcileJob(readJob(jobId))
@@ -2219,7 +2225,9 @@ function usage() {
   guard  <jobId> [--json]      git write guard state, and any refs the job pushed
                                into its sandbox instead of the real remote
   wait   <jobId> [--timeout-ms N] [--json]
-                               block until the job settles, then print the result
+                               block until the job settles, then print the result;
+                               default limit is the job's own timeout + 12 min;
+                               exit 2 when it gives up with the job still running
   update <jobId> "<new info>" [--json]  steer a running job onto the right track
                                  --prompt-file FILE, -f FILE, or - (stdin) give the
                                  message without the shell (use it for backticks)

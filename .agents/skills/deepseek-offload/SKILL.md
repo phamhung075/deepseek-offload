@@ -134,11 +134,11 @@ it for every job, whether or not the caller has other work while the job runs.
 
 ```sh
 # One background command PER job (run_in_background: true / background command), all sent in one turn:
-node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId1> --timeout-ms 3600000 2>&1 \
-  | sed -n -e '/^dsh-offload:/p' -e '/--- result ---/,$p' | cut -c1-2600 | head -50; echo "wait exit=${PIPESTATUS[0]}"
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId1> 2>&1 \
+  | sed -n -e '/^dsh-offload:/p' -e '/--- result ---/,$p' | cut -c1-2600 | head -50; rc=${PIPESTATUS[0]}; echo "wait exit=$rc"; exit $rc
 # ...and a second, separate background command:
-node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId2> --timeout-ms 3600000 2>&1 \
-  | sed -n -e '/^dsh-offload:/p' -e '/--- result ---/,$p' | cut -c1-2600 | head -50; echo "wait exit=${PIPESTATUS[0]}"
+node .agents/skills/deepseek-offload/scripts/dsh-offload.mjs wait <jobId2> 2>&1 \
+  | sed -n -e '/^dsh-offload:/p' -e '/--- result ---/,$p' | cut -c1-2600 | head -50; rc=${PIPESTATUS[0]}; echo "wait exit=$rc"; exit $rc
 ```
 
 Why this shape:
@@ -150,7 +150,12 @@ Why this shape:
    `waiting running 15s...` progress messages, delivering only the clean deliverable. The
    `/^dsh-offload:/p` clause and the `wait exit=` line keep the runner's own errors and exit code:
    without them a pipeline exits with `head`'s status, so a failed `wait` (for example an unknown
-   job id) "completes" with empty output and exit 0 (observed 2026-11-07). `wait`, `status` and
+   job id) "completes" with empty output and exit 0 (observed 2026-11-07); `exit $rc` hands the
+   runner's code to the background notification. `wait` exits 0 (job done) or 1 (job failed, or
+   unknown id) once the job settled, and 2 when it gave up while the job still runs: a `2` is not
+   "job ended", start a new waiter. Without `--timeout-ms` it waits as long as the job itself may
+   run (the job's own `--timeout-ms`, from its off-peak wake for a deferred job, plus the 10-minute
+   boot grace and 2 minutes); pass `--timeout-ms` only to give up sooner. `status` and
    `result` exit 1 on an unknown id. A job id the caller's own store lacks is looked up in the
    machine-wide job index (`~/.local/state/dsh-offload/job-index.jsonl`, or `$DSH_OFFLOAD_INDEX`),
    so a waiter launched from another directory than the one `start` ran in still finds its job.
@@ -335,7 +340,7 @@ node "$OFF" update  <jobId> -f note.md    # any text with backticks: from a file
 node "$OFF" cancel  <jobId>               # stop outright, no redirect
 node "$OFF" resume  <jobId> ["<extra>"]    # continue an interrupted job's session in a new job
 node "$OFF" resume  <jobId> -f extra.md   # extra instructions with backticks: from a file (or `- < extra.md`)
-node "$OFF" wait    <jobId> --timeout-ms 900000
+node "$OFF" wait    <jobId>                 # as long as the job may run; exit 2 if still running
 node "$OFF" list    --all
 node "$OFF" sessions --cwd "$PWD"        # sessions in the shared store the GUI lists
 node "$OFF" mcp-servers --mcp-config "$PWD/.mcp.json"   # which MCP tools the child would get
@@ -373,7 +378,7 @@ only for an explicit `-`. Text given both as an argument and with `--prompt-file
 | `update` | Relays new information (the trailing text, `--prompt-file FILE` / `-f FILE`, or `-` for stdin) to a **running** job's live session via a per-job Unix socket, interrupting and redirecting it (same mechanism as `deepseek_update_session`, over IPC since the worker is a separate detached process). The socket sits next to the job record; when that path would pass the 108-byte Unix socket limit (a deep checkout such as a 4genthub seat worktree), it goes to `$XDG_RUNTIME_DIR/dsh-offload/` or `/tmp/dsh-offload-<uid>/` instead, and the job record's `socketPath` names it. Fails clearly if the job isn't running, the session isn't discovered yet, or the worker is gone. | `0` delivered, `1` failed/rejected |
 | `cancel` | Stops a running job outright — no redirect. Tries the same graceful socket path as `update` (bare cancel, no message) first, so the worker settles to `state: cancelled` on its own; falls back to killing the worker's whole process tree (`SIGTERM` then `SIGKILL`) if the socket is unreachable. Idempotent — cancelling an already-finished job just reports its state. | `0` always (idempotent) |
 | `resume` | Continues a finished, failed, or interrupted job's DeepSeek session in a **new** job through ACP `session/resume`: same session id, conversation history, `cwd`, git write guard, and file policy. The first turn tells the agent its run was interrupted, to re-check the workspace for partial edits, and to finish the original task; trailing text, `--prompt-file FILE` / `-f FILE`, or `-` (stdin) is appended as extra instructions. Refuses a job that is still active (worker alive) or never recorded a session id; `--session ID --cwd DIR` resumes a session found with `sessions` that has no job record. The new job records `resumeOf`, the original `resumedBy`. | `0` launched, `1` refused |
-| `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. `Ctrl-C` stops waiting, not the job. | as `result`, `2` on timeout |
+| `wait` | Prints the job header at once — session id included — then polls until the job settles, with one line per state change and a heartbeat every 15s, and prints the result. Without `--timeout-ms` it waits until the job's own timeout + 12 min. `Ctrl-C` stops waiting, not the job. | as `result`; `2` when it gives up with the job still running |
 | `list` | Recent jobs, newest first; `--all` for every job. | `0` |
 | `sessions` | Raw session list for the shared store. | `0` |
 | `mcp-servers` | Resolves what MCP servers a job would receive, without running one. | `0`, `1` on bad config |
@@ -568,7 +573,7 @@ the job that missed it is redone.
 | `dsh --profile acp exited with code …` | `acp` profile not initialized: `cd ~/deepseek-harness && pnpm dsh --profile acp --dump-config`. |
 | `ACP request timed out ... initialize (3 of 3 boot attempts)` | `dsh` could not boot while the machine was busy, three times, so no turn ran and no tokens were spent. A boot that times out is repeated by itself, so one failed boot no longer ends a job. Wait for the load to drop and start again, or raise `DEEPSEEK_MCP_INIT_TIMEOUT_MS`. |
 | Job `state: error`, worker gone | Worker died (crash/reboot) — read `scratch/dsh-offload/jobs/<jobId>.worker.log`. |
-| `wait` times out, job still running | Not stuck — raise `--timeout-ms`; check `status`, or follow the session log with `scripts/session-tail.mjs <jobId> --watch`. |
+| `wait` times out (exit 2), job still running | Not stuck, and not finished: start a new waiter (drop a short `--timeout-ms`); check `status`, or follow the session log with `scripts/session-tail.mjs <jobId> --watch`. |
 | Result ends mid-sentence | ACP prompt timeout (`DEEPSEEK_MCP_TIMEOUT_MS`) — split the job or raise it. |
 | Job's `FilePolicy:` line says `read-only` and the child reports denied writes | The `--read-only` flag working as intended: the sandbox refused the mutation. Drop the flag only if the job genuinely must change files. |
 | `FilePolicy: read-only REQUESTED but its overlay could not be written` | The bridge could not write `$DSH_HOME/offload-read-only.cordis.yml` — treat the job as write-capable and fix the DSH_HOME permissions. |

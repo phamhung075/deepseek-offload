@@ -150,6 +150,8 @@ node "$R" start "<prompt>" [--prompt-file FILE] [-f FILE] [--cwd DIR]
                            [--allow-git-write] [--wait-session-ms N] [--json]
 node "$R" wait   <jobId> [--timeout-ms N] [--json]
                                         print the header, then block until the job settles
+                                        (default limit: the job's timeout + 12 min; exit 2
+                                        when it gives up with the job still running)
 node "$R" update <jobId> "<new info>"   steer a running job
 node "$R" cancel <jobId>                stop it outright
 node "$R" resume <jobId> ["<extra>"]    continue an interrupted job's session in a new job
